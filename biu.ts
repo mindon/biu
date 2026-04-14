@@ -11,15 +11,96 @@ import { createHash } from "node:crypto";
 
 // updated from https://github.com/lit/lit/tree/main/packages/labs/rollup-plugin-minify-html-literals/src/lib
 import { minifyHTMLLiterals } from "./lib/minify-html-literals.ts";
+import { existsSync } from "node:fs";
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 
 import { basename, dirname, extname, join, relative, resolve } from "node:path";
 
 const cleanCss = new CleanCSS();
 
-/** 生成内容 hash（取前8位），用于 CSS 输出文件名 */
-function contentHash(content: string, len = 8): string {
+/** 生成内容 hash（取前8位），用于输出文件名 */
+function contentHash(content: string | Buffer, len = 8): string {
   return createHash("md5").update(content).digest("hex").slice(0, len);
+}
+
+/** 已由其他步骤处理的文件扩展名（JS/TS/HTML/CSS/SCSS 等） */
+const MANAGED_EXTS = new Set([
+  ".ts",
+  ".js",
+  ".mts",
+  ".mjs",
+  ".html",
+  ".htm",
+  ".css",
+  ".scss",
+  ".sass",
+]);
+
+/** 常见的 HTML 静态资源扩展名 */
+const ASSET_EXTS = new Set([
+  // 图片
+  ".png",
+  ".jpg",
+  ".jpeg",
+  ".gif",
+  ".svg",
+  ".webp",
+  ".avif",
+  ".ico",
+  ".bmp",
+  // 字体
+  ".woff",
+  ".woff2",
+  ".ttf",
+  ".otf",
+  ".eot",
+  // 音视频
+  ".mp3",
+  ".ogg",
+  ".wav",
+  ".mp4",
+  ".webm",
+  ".ogv",
+  // 其他
+  ".json",
+  ".xml",
+  ".txt",
+  ".pdf",
+  ".wasm",
+  ".map",
+]);
+
+/**
+ * 复制静态资源文件到 outDir，加上内容 hash
+ * 返回 源绝对路径 → 输出绝对路径 的映射
+ */
+async function processAssetFiles(
+  assetFiles: string[],
+  srcDir: string,
+  outDir: string,
+): Promise<Map<string, string>> {
+  const sourceToOutputAsset = new Map<string, string>();
+  const results = await Promise.all(
+    assetFiles.map(async (file) => {
+      const buf = await readFile(file);
+      const hash = contentHash(buf);
+      const ext = extname(file);
+      const name = basename(file, ext);
+      const outputName = `${name}-${hash}${ext}`;
+      const relDir = dirname(relative(srcDir, file));
+      const outputDir = join(outDir, relDir);
+      await mkdir(outputDir, { recursive: true });
+      const outputPath = join(outputDir, outputName);
+      if (!existsSync(outputPath)) {
+        await writeFile(outputPath, buf);
+      }
+      return [file, outputPath] as const;
+    }),
+  );
+  for (const [src, out] of results) {
+    sourceToOutputAsset.set(src, out);
+  }
+  return sourceToOutputAsset;
 }
 
 /**
@@ -47,17 +128,22 @@ async function processStyleFiles(
   outDir: string,
 ): Promise<Map<string, string>> {
   const sourceToOutputCss = new Map<string, string>();
-  for (const file of styleFiles) {
-    const css = await compileStyle(file);
-    const hash = contentHash(css);
-    const name = basename(file).replace(/\.(scss|sass|css)$/, "");
-    const outputName = `${name}-${hash}.css`;
-    const relDir = dirname(relative(srcDir, file));
-    const outputDir = join(outDir, relDir);
-    await mkdir(outputDir, { recursive: true });
-    const outputPath = join(outputDir, outputName);
-    await writeFile(outputPath, css);
-    sourceToOutputCss.set(file, outputPath);
+  const results = await Promise.all(
+    styleFiles.map(async (file) => {
+      const css = await compileStyle(file);
+      const hash = contentHash(css);
+      const name = basename(file).replace(/\.(scss|sass|css)$/, "");
+      const outputName = `${name}-${hash}.css`;
+      const relDir = dirname(relative(srcDir, file));
+      const outputDir = join(outDir, relDir);
+      await mkdir(outputDir, { recursive: true });
+      const outputPath = join(outputDir, outputName);
+      await writeFile(outputPath, css);
+      return [file, outputPath] as const;
+    }),
+  );
+  for (const [src, out] of results) {
+    sourceToOutputCss.set(src, out);
   }
   return sourceToOutputCss;
 }
@@ -166,9 +252,11 @@ async function buildProject(srcDir: string, outDir: string) {
     f.endsWith(".ts") || f.endsWith(".js")
   );
   const htmlFiles = allFiles.filter((f) => f.endsWith(".html"));
-  const styleFiles = allFiles.filter((f) =>
-    /\.(scss|sass|css)$/.test(f)
-  );
+  const styleFiles = allFiles.filter((f) => /\.(scss|sass|css)$/.test(f));
+  const assetFiles = allFiles.filter((f) => {
+    const ext = extname(f).toLowerCase();
+    return !MANAGED_EXTS.has(ext) && ASSET_EXTS.has(ext);
+  });
 
   // 递归解析依赖
   async function resolveDependencies(
@@ -209,12 +297,17 @@ async function buildProject(srcDir: string, outDir: string) {
     };
   }
 
-  // 从 HTML 入口开始分析依赖
+  // 从 HTML 入口开始分析依赖（并行读取所有 HTML）
   let initialEntries: string[] = [];
   const initialModules: string[] = [];
 
-  for (const htmlFile of htmlFiles) {
-    const htmlContent = await readFile(htmlFile, "utf8");
+  const htmlContents = await Promise.all(
+    htmlFiles.map(async (htmlFile) => ({
+      file: htmlFile,
+      content: await readFile(htmlFile, "utf8"),
+    })),
+  );
+  for (const { file: htmlFile, content: htmlContent } of htmlContents) {
     const matches = htmlContent.matchAll(
       /(?:src|import|from)\s*[:=]\s*["'](\.?\/?.*?\.(ts|js)([#\?][^"']*)?)["']/g,
     );
@@ -249,136 +342,217 @@ async function buildProject(srcDir: string, outDir: string) {
 
   // 1. 先构建 moduleEntries（使用 basePlugin，因为 module 自身也可能依赖其他 module）
   // module 之间也可能有依赖，所以 module 构建也需要 external 拦截
-  for (const file of moduleEntries) {
-    // 这个 module 可能依赖其他 module，需要将"其他 module"标记为 external
-    const otherModules = new Set(moduleEntries.filter((m) => m !== file));
-    const plugin = otherModules.size > 0
-      ? createMainPlugin(otherModules)
-      : basePlugin;
+  // 注意：module 之间有依赖顺序，需要串行构建
+  async function buildModules() {
+    for (const file of moduleEntries) {
+      // 这个 module 可能依赖其他 module，需要将"其他 module"标记为 external
+      const otherModules = new Set(moduleEntries.filter((m) => m !== file));
+      const plugin = otherModules.size > 0
+        ? createMainPlugin(otherModules)
+        : basePlugin;
 
-    const res = await build({
-      entrypoints: [file],
-      outdir: join(outDir, dirname(file.replace(srcDir, ""))),
-      minify: true,
-      target: "browser",
-      naming: "[name]-[hash].js",
-      plugins: [plugin],
-    });
-    for (const output of res.outputs) {
-      allOutputs.push(output);
-      sourceToOutput.set(file, output.path);
+      const res = await build({
+        entrypoints: [file],
+        outdir: join(outDir, dirname(file.replace(srcDir, ""))),
+        minify: true,
+        target: "browser",
+        naming: "[name]-[hash].js",
+        plugins: [plugin],
+      });
+      for (const output of res.outputs) {
+        allOutputs.push(output);
+        sourceToOutput.set(file, output.path);
+      }
     }
   }
+
+  // ── 并行阶段 1：JS build / CSS 编译 / Asset 复制 三路并行 ──
+  const [, sourceToOutputCss, sourceToOutputAsset] = await Promise.all([
+    buildModules(),
+    processStyleFiles(styleFiles, srcDir, outDir),
+    processAssetFiles(assetFiles, srcDir, outDir),
+  ]);
 
   console.log("Source -> Output mapping (JS):");
   for (const [src, out] of sourceToOutput) {
     console.log(`  ${relative(srcDir, src)} -> ${relative(outDir, out)}`);
   }
-
-  // 2. 编译并压缩 SCSS / CSS 文件，输出带 hash 的 .css
-  const sourceToOutputCss = await processStyleFiles(styleFiles, srcDir, outDir);
   if (sourceToOutputCss.size > 0) {
     console.log("\nSource -> Output mapping (CSS):");
     for (const [src, out] of sourceToOutputCss) {
       console.log(`  ${relative(srcDir, src)} -> ${relative(outDir, out)}`);
     }
   }
+  if (sourceToOutputAsset.size > 0) {
+    console.log("\nSource -> Output mapping (Assets):");
+    for (const [src, out] of sourceToOutputAsset) {
+      console.log(`  ${relative(srcDir, src)} -> ${relative(outDir, out)}`);
+    }
+  }
 
-  // 3. 构建后处理：更新 JS 产物内部的 import 路径，使其指向带哈希的新文件名
-  for (const output of allOutputs) {
-    if (!output.path.endsWith(".js")) continue;
-    let code = await readFile(output.path, "utf8");
-    let changed = false;
+  // ── 并行阶段 2：CSS url() 替换 + JS import 路径替换 并行 ──
+  async function updateCssUrls() {
+    // 更新 CSS 产物中的 url() 引用，指向带 hash 的资源文件
+    await Promise.all(
+      Array.from(sourceToOutputCss).map(async ([cssSrcFile, cssOutFile]) => {
+        let css = await readFile(cssOutFile, "utf8");
+        let cssChanged = false;
+        const cssOutDir = dirname(cssOutFile);
+        const cssSrcDir = dirname(cssSrcFile);
 
-    // 遍历所有 module 映射，替换产物中的 import 路径
-    for (const [srcFile, outputFile] of sourceToOutput) {
-      if (!moduleAbsPaths.has(srcFile)) continue;
-
-      const srcBaseName = basename(srcFile).replace(/\.(ts|js)$/, "");
-      const outputFileName = basename(outputFile);
-
-      // 匹配产物中对这个模块的引用：
-      // import ... from "./test.js"  或 from"./test.js" (minified)
-      const patterns = [
-        // 标准格式: "./name.js" 或 "./name.ts"
-        new RegExp(
-          `((?:import|from)\\s*["']\\.\\/)(${srcBaseName})(\\.(?:js|ts))(["'])`,
-          "g",
-        ),
-        // 可能带路径: from"./sub/name.js"
-        new RegExp(
-          `((?:import|from)\\s*["'][^"']*\\/)(${srcBaseName})(\\.(?:js|ts))(["'])`,
-          "g",
-        ),
-      ];
-
-      for (const pattern of patterns) {
-        const newCode = code.replace(
-          pattern,
-          `$1${outputFileName}${extras?.[srcFile] ?? ""}$4`,
-        );
-        if (newCode !== code) {
-          code = newCode;
-          changed = true;
+        for (const [assetSrcFile, assetOutFile] of sourceToOutputAsset) {
+          const relFromCss = relative(cssSrcDir, assetSrcFile);
+          const escapedRelPath = relFromCss.replace(
+            /[.*+?^${}()|[\]\\]/g,
+            "\\$&",
+          );
+          const newCss = css.replace(
+            new RegExp(
+              `(url\\(["']?)(?:\\.\\/)?${escapedRelPath}(["']?\\))`,
+              "g",
+            ),
+            (match, prefix, suffix) => {
+              if (/data\s*:/i.test(match)) return match;
+              const relOutput = relative(cssOutDir, assetOutFile);
+              return `${prefix}${relOutput}${suffix}`;
+            },
+          );
+          if (newCss !== css) {
+            css = newCss;
+            cssChanged = true;
+          }
         }
-      }
-    }
-
-    if (changed) {
-      await writeFile(output.path, code);
-    }
+        if (cssChanged) {
+          await writeFile(cssOutFile, css);
+        }
+      }),
+    );
   }
 
-  // 4. 更新 HTML 中的引用（JS + CSS）
+  async function updateJsImports() {
+    // 更新 JS 产物内部的 import 路径，使其指向带哈希的新文件名
+    await Promise.all(
+      allOutputs
+        .filter((output) => output.path.endsWith(".js"))
+        .map(async (output) => {
+          let code = await readFile(output.path, "utf8");
+          let changed = false;
+
+          for (const [srcFile, outputFile] of sourceToOutput) {
+            if (!moduleAbsPaths.has(srcFile)) continue;
+
+            const srcBaseName = basename(srcFile).replace(/\.(ts|js)$/, "");
+            const outputFileName = basename(outputFile);
+
+            const patterns = [
+              new RegExp(
+                `((?:import|from)\\s*["']\\.\\/)(${srcBaseName})(\\.(?:js|ts))(["'])`,
+                "g",
+              ),
+              new RegExp(
+                `((?:import|from)\\s*["'][^"']*\\/)(${srcBaseName})(\\.(?:js|ts))(["'])`,
+                "g",
+              ),
+            ];
+
+            for (const pattern of patterns) {
+              const newCode = code.replace(
+                pattern,
+                `$1${outputFileName}${extras?.[srcFile] ?? ""}$4`,
+              );
+              if (newCode !== code) {
+                code = newCode;
+                changed = true;
+              }
+            }
+          }
+
+          if (changed) {
+            await writeFile(output.path, code);
+          }
+        }),
+    );
+  }
+
+  await Promise.all([updateCssUrls(), updateJsImports()]);
+
+  // ── 并行阶段 3：多个 HTML 文件并行处理引用替换 ──
   console.log("\nHTML Files Processing:");
-  for (const file of htmlFiles) {
-    let content = await processHtml(file);
-    console.log(" ", relative(srcDir, file));
+  await Promise.all(
+    htmlFiles.map(async (file) => {
+      let content = await processHtml(file);
+      console.log(" ", relative(srcDir, file));
 
-    // 4a. 替换 JS 引用
-    for (const [srcFile, outputFile] of sourceToOutput) {
-      const srcBaseName = basename(srcFile).replace(/\.(ts|js)$/, "");
-      const outputFileName = basename(outputFile);
+      // 4a. 替换 JS 引用
+      for (const [srcFile, outputFile] of sourceToOutput) {
+        const srcBaseName = basename(srcFile).replace(/\.(ts|js)$/, "");
+        const outputFileName = basename(outputFile);
 
-      // 替换 HTML 中的 src="./main.ts" -> src="./main-[hash].js"
-      // 以及 inline script 中的 from './test.ts' -> from './test-[hash].js' 或 from '../test.ts'
-      // 替换 HTML 中的引用，保留相对路径前缀
-      content = content.replace(
-        new RegExp(
-          `(["'])((?:\\.\\/|\\.\\.\\/)?)[^"']*${srcBaseName}(\\.(?:ts|js))([#\\?][^"']*)?(['"])`,
-          "g",
-        ),
-        `$1$2${outputFileName}$4$5`,
-      );
-    }
+        content = content.replace(
+          new RegExp(
+            `(["'])((?:\\.\\/|\\.\\.\\/)?)[^"']*${srcBaseName}(\\.(?:ts|js))([#\\?][^"']*)?(['"])`,
+            "g",
+          ),
+          `$1$2${outputFileName}$4$5`,
+        );
+      }
 
-    // 4b. 替换 CSS/SCSS 引用
-    // <link rel="stylesheet" href="style.scss"> -> <link rel="stylesheet" href="style-[hash].css">
-    for (const [srcFile, outputFile] of sourceToOutputCss) {
-      const srcBaseName = basename(srcFile).replace(/\.(scss|sass|css)$/, "");
-      const srcExt = extname(srcFile);  // .scss, .sass, .css
-      const targetDir = dirname(file.replace(srcDir, outDir));  // 输出 HTML 所在目录
+      // 4b. 替换 CSS/SCSS 引用
+      for (const [srcFile, outputFile] of sourceToOutputCss) {
+        const srcBaseName = basename(srcFile).replace(/\.(scss|sass|css)$/, "");
+        const srcExt = extname(srcFile);
+        const targetDir = dirname(file.replace(srcDir, outDir));
 
-      // 匹配 href="..." 或 src="..." 中引用此样式文件的路径
-      // 支持: "styles.scss", "./styles.scss", "../styles.scss" 等
-      const escapedName = srcBaseName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-      const escapedExt = srcExt.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-      content = content.replace(
-        new RegExp(
-          `(["'])((?:\\.\\/|(?:\\.\\.\\/)*)?)${escapedName}${escapedExt}(["'])`,
-          "g",
-        ),
-        (_match, q1, _prefix, q2) => {
-          const relOutput = relative(targetDir, outputFile);
-          return `${q1}${relOutput}${q2}`;
-        },
-      );
-    }
+        const escapedName = srcBaseName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        const escapedExt = srcExt.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        content = content.replace(
+          new RegExp(
+            `(["'])((?:\\.\\/|(?:\\.\\.\\/)*)?)${escapedName}${escapedExt}(["'])`,
+            "g",
+          ),
+          (_match, q1, _prefix, q2) => {
+            const relOutput = relative(targetDir, outputFile);
+            return `${q1}${relOutput}${q2}`;
+          },
+        );
+      }
 
-    const targetPath = file.replace(srcDir, outDir);
-    await mkdir(dirname(targetPath), { recursive: true });
-    await writeFile(targetPath, content);
-  }
+      // 4c. 替换静态资源引用（图片/字体/音视频等）
+      for (const [srcFile, outputFile] of sourceToOutputAsset) {
+        const targetDir = dirname(file.replace(srcDir, outDir));
+        const htmlSrcDir = dirname(file);
+        const relFromHtml = relative(htmlSrcDir, srcFile);
+        const escapedRelPath = relFromHtml.replace(
+          /[.*+?^${}()|[\]\\]/g,
+          "\\$&",
+        );
+        // 排除 data: URI（base64 内联资源）
+        content = content.replace(
+          new RegExp(
+            `(["'])(?:\\.\\/)?${escapedRelPath}(["'])`,
+            "g",
+          ),
+          (match, q1, q2) => {
+            const idx = content.indexOf(match);
+            if (
+              idx > 5 &&
+              /data\s*:[^"']*$/i.test(
+                content.slice(Math.max(0, idx - 200), idx),
+              )
+            ) {
+              return match;
+            }
+            const relOutput = relative(targetDir, outputFile);
+            return `${q1}${relOutput}${q2}`;
+          },
+        );
+      }
+
+      const targetPath = file.replace(srcDir, outDir);
+      await mkdir(dirname(targetPath), { recursive: true });
+      await writeFile(targetPath, content);
+    }),
+  );
 }
 
 async function run() {
@@ -400,7 +574,7 @@ async function run() {
     const watcher = Bun.watch(
       resolve(process.argv[2] || "./"),
       async (event, filename) => {
-        if (filename && /\.(ts|js|html|scss|sass|css)$/.test(filename)) {
+        if (filename && !/node_modules|dist/.test(filename)) {
           console.log(`✨ Detected change in ${filename}, rebuilding...`);
           await buildProject(srcDir, outDir);
         }
