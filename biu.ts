@@ -64,11 +64,27 @@ const ASSET_EXTS = new Set([
   // 其他
   ".json",
   ".xml",
+  ".csv",
+  ".tsv",
   ".txt",
   ".pdf",
   ".wasm",
   ".map",
 ]);
+
+// 通过环境变量 BIU_ASSET_EXTS 增加更多静态资源扩展名
+// 格式：逗号或空格分隔，扩展名可带或不带点号前缀
+// 例如：BIU_ASSET_EXTS="glb,gltf,hdr"
+if (process.env.BIU_ASSETS_EXTS) {
+  for (
+    const raw of process.env.BIU_ASSET_EXTS?.split(/[\s,;]+/).filter(Boolean)
+  ) {
+    const ext = raw.startsWith(".")
+      ? raw.toLowerCase()
+      : `.${raw.toLowerCase()}`;
+    ASSET_EXTS.add(ext);
+  }
+}
 
 /**
  * 复制静态资源文件到 outDir，加上内容 hash
@@ -430,7 +446,13 @@ async function buildProject(srcDir: string, outDir: string) {
   }
 
   async function updateJsImports() {
-    // 更新 JS 产物内部的 import 路径，使其指向带哈希的新文件名
+    // 构建产物路径 → 源文件路径的反向映射，用于确定 JS 产物的源目录
+    const outputToSource = new Map<string, string>();
+    for (const [src, out] of sourceToOutput) {
+      outputToSource.set(out, src);
+    }
+
+    // 更新 JS 产物内部的 import 路径 + 资源路径字符串
     await Promise.all(
       allOutputs
         .filter((output) => output.path.endsWith(".js"))
@@ -438,6 +460,7 @@ async function buildProject(srcDir: string, outDir: string) {
           let code = await readFile(output.path, "utf8");
           let changed = false;
 
+          // (a) 替换 import/from 中的 module 引用路径
           for (const [srcFile, outputFile] of sourceToOutput) {
             if (!moduleAbsPaths.has(srcFile)) continue;
 
@@ -459,6 +482,76 @@ async function buildProject(srcDir: string, outDir: string) {
               const newCode = code.replace(
                 pattern,
                 `$1${outputFileName}${extras?.[srcFile] ?? ""}$4`,
+              );
+              if (newCode !== code) {
+                code = newCode;
+                changed = true;
+              }
+            }
+          }
+
+          // (b) 替换 JS 产物中的字符串路径引用（静态资源 + CSS + JS/TS）
+          // 例如: "./img/logo.png" → "./img/logo-abc12345.png"
+          //       "./styles.scss" → "./styles-hash.css"
+          //       new Worker("./worker.ts") → new Worker("./worker-hash.js")
+          const jsSrcFile = outputToSource.get(output.path);
+          if (jsSrcFile) {
+            const jsSrcDir = dirname(jsSrcFile);
+            const jsOutDir = dirname(output.path);
+
+            // 合并所有需要替换的映射：Asset + CSS + JS/TS（不含自身和已由 import 处理的）
+            // 按源文件相对路径长度降序排列，确保长路径优先匹配
+            const allMappings: [string, string][] = [];
+            for (const [src, out] of sourceToOutputAsset) {
+              allMappings.push([src, out]);
+            }
+            for (const [src, out] of sourceToOutputCss) {
+              allMappings.push([src, out]);
+            }
+            for (const [src, out] of sourceToOutput) {
+              // 跳过自身；import/from 引用由 (a) 处理，这里处理非 import 的字符串引用
+              if (src === jsSrcFile) continue;
+              allMappings.push([src, out]);
+            }
+
+            // 按相对路径长度降序排列，长路径优先匹配，防止短路径子串误匹配
+            allMappings.sort((a, b) =>
+              relative(jsSrcDir, b[0]).length - relative(jsSrcDir, a[0]).length
+            );
+
+            for (const [mappedSrcFile, mappedOutFile] of allMappings) {
+              // 计算从 JS 源文件到引用文件的相对路径
+              const relFromJs = relative(jsSrcDir, mappedSrcFile);
+              const escapedRelPath = relFromJs.replace(
+                /[.*+?^${}()|[\]\\]/g,
+                "\\$&",
+              );
+              // 匹配字符串字面量中的路径：
+              // "img/logo.png" / "./styles.scss" / './worker.ts' 等
+              // 排除 data: URI 和 import/from 语句
+              const newCode = code.replace(
+                new RegExp(
+                  `(["'\`])(?:\\.\\/)?${escapedRelPath}(["'\`])`,
+                  "g",
+                ),
+                (match, q1, q2, offset) => {
+                  // 排除 data: URI
+                  if (
+                    offset > 5 &&
+                    /data\s*:[^"'`]*$/i.test(
+                      code.slice(Math.max(0, offset - 200), offset),
+                    )
+                  ) {
+                    return match;
+                  }
+                  // 排除 import/from 语句（这些由 (a) 处理）
+                  const before = code.slice(Math.max(0, offset - 50), offset);
+                  if (/(?:import|from)\s*$/i.test(before)) {
+                    return match;
+                  }
+                  const relOutput = relative(jsOutDir, mappedOutFile);
+                  return `${q1}${relOutput}${q2}`;
+                },
               );
               if (newCode !== code) {
                 code = newCode;
@@ -584,5 +677,5 @@ async function run() {
     await buildProject(srcDir, outDir);
   }
 }
-console.log("\nbiu v2026.0413\nusage: biu [src-dir] [out-dir] [--watch]\n\n");
+console.log("\nbiu v2026.0414\nusage: biu [src-dir] [out-dir] [--watch]\n\n");
 run().catch(console.error);
