@@ -1,0 +1,11 @@
+{
+  "name": "bun-minifier",
+  "version": "1.0.0",
+  "description": "Zero-config bun build tool with minify and module splitting",
+  "main": "index.ts",
+  "dependencies": {
+    "clean-css": "^5.3.3",
+    "html-minifier-next": "^6.1.2",
+    "html-minifier-terser": "^7.2.0"
+  }
+}
