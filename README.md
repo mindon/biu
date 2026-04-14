@@ -35,7 +35,7 @@ Run the `biu` binary or use `bun run` directly.
 ./biu [src-dir] [out-dir] [--watch]
 ```
 
-- `src-dir`: The source directory containing your project files (default: `./`).
+- `src-dir`: The source directory containing your project files (default: `./src`).
 - `out-dir`: The target directory for the production build (default: `./dist`).
 - `--watch`: Enable live reload mode.
 
@@ -43,7 +43,7 @@ Run the `biu` binary or use `bun run` directly.
 
 **Basic build:**
 ```bash
-./biu . ./dist
+./biu ./src ./dist
 ```
 
 **Watch mode:**
