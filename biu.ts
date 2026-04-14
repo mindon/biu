@@ -1,19 +1,66 @@
 // biu, a bundler for htmls with typescript, run with bun
-// bun build ./biu.ts --compile --outfile=biu
+// bun build ./biu.ts --compile --minify --outfile=biu
 // usage: biu [src-dir] [out-dir] [--watch]
 // use ?? to force import ts/js inline, e.g. import {my} from "my.ts??";
 
 import { build, type Plugin } from "bun";
 import { minify as minifyHtml } from "html-minifier-terser";
 import CleanCSS from "clean-css";
+import * as sass from "sass";
+import { createHash } from "node:crypto";
 
 // updated from https://github.com/lit/lit/tree/main/packages/labs/rollup-plugin-minify-html-literals/src/lib
 import { minifyHTMLLiterals } from "./lib/minify-html-literals.ts";
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 
-import { basename, dirname, join, relative, resolve } from "node:path";
+import { basename, dirname, extname, join, relative, resolve } from "node:path";
 
 const cleanCss = new CleanCSS();
+
+/** 生成内容 hash（取前8位），用于 CSS 输出文件名 */
+function contentHash(content: string, len = 8): string {
+  return createHash("md5").update(content).digest("hex").slice(0, len);
+}
+
+/**
+ * 编译 SCSS / 压缩 CSS，返回压缩后的 CSS 文本
+ */
+async function compileStyle(filePath: string): Promise<string> {
+  const ext = extname(filePath).toLowerCase();
+  let css: string;
+  if (ext === ".scss" || ext === ".sass") {
+    const result = sass.compile(filePath);
+    css = result.css;
+  } else {
+    css = await readFile(filePath, "utf8");
+  }
+  return cleanCss.minify(css).styles;
+}
+
+/**
+ * 处理所有 scss / css 文件：编译 → 压缩 → 带 hash 输出
+ * 返回 sourceToOutputCss 映射 (源绝对路径 → 输出绝对路径)
+ */
+async function processStyleFiles(
+  styleFiles: string[],
+  srcDir: string,
+  outDir: string,
+): Promise<Map<string, string>> {
+  const sourceToOutputCss = new Map<string, string>();
+  for (const file of styleFiles) {
+    const css = await compileStyle(file);
+    const hash = contentHash(css);
+    const name = basename(file).replace(/\.(scss|sass|css)$/, "");
+    const outputName = `${name}-${hash}.css`;
+    const relDir = dirname(relative(srcDir, file));
+    const outputDir = join(outDir, relDir);
+    await mkdir(outputDir, { recursive: true });
+    const outputPath = join(outputDir, outputName);
+    await writeFile(outputPath, css);
+    sourceToOutputCss.set(file, outputPath);
+  }
+  return sourceToOutputCss;
+}
 
 /**
  * 基础插件：仅做 html/css 模板字面量压缩，用于构建独立 module 文件
@@ -28,7 +75,7 @@ const basePlugin: Plugin = {
         /((?:import|from)\s+["'][^"']*?)[#\?][^"']*(["'])/g,
         "$1$2",
       );
-      const result = minifyHTMLLiterals(code);
+      const result: any = minifyHTMLLiterals(code);
       return { contents: result ? result.code : code, loader: "ts" };
     });
   },
@@ -119,6 +166,9 @@ async function buildProject(srcDir: string, outDir: string) {
     f.endsWith(".ts") || f.endsWith(".js")
   );
   const htmlFiles = allFiles.filter((f) => f.endsWith(".html"));
+  const styleFiles = allFiles.filter((f) =>
+    /\.(scss|sass|css)$/.test(f)
+  );
 
   // 递归解析依赖
   async function resolveDependencies(
@@ -220,9 +270,18 @@ async function buildProject(srcDir: string, outDir: string) {
     }
   }
 
-  console.log("Source -> Output mapping:");
+  console.log("Source -> Output mapping (JS):");
   for (const [src, out] of sourceToOutput) {
     console.log(`  ${relative(srcDir, src)} -> ${relative(outDir, out)}`);
+  }
+
+  // 2. 编译并压缩 SCSS / CSS 文件，输出带 hash 的 .css
+  const sourceToOutputCss = await processStyleFiles(styleFiles, srcDir, outDir);
+  if (sourceToOutputCss.size > 0) {
+    console.log("\nSource -> Output mapping (CSS):");
+    for (const [src, out] of sourceToOutputCss) {
+      console.log(`  ${relative(srcDir, src)} -> ${relative(outDir, out)}`);
+    }
   }
 
   // 3. 构建后处理：更新 JS 产物内部的 import 路径，使其指向带哈希的新文件名
@@ -270,12 +329,13 @@ async function buildProject(srcDir: string, outDir: string) {
     }
   }
 
-  // 4. 更新 HTML 中的引用
+  // 4. 更新 HTML 中的引用（JS + CSS）
   console.log("\nHTML Files Processing:");
   for (const file of htmlFiles) {
     let content = await processHtml(file);
     console.log(" ", relative(srcDir, file));
 
+    // 4a. 替换 JS 引用
     for (const [srcFile, outputFile] of sourceToOutput) {
       const srcBaseName = basename(srcFile).replace(/\.(ts|js)$/, "");
       const outputFileName = basename(outputFile);
@@ -289,6 +349,29 @@ async function buildProject(srcDir: string, outDir: string) {
           "g",
         ),
         `$1$2${outputFileName}$4$5`,
+      );
+    }
+
+    // 4b. 替换 CSS/SCSS 引用
+    // <link rel="stylesheet" href="style.scss"> -> <link rel="stylesheet" href="style-[hash].css">
+    for (const [srcFile, outputFile] of sourceToOutputCss) {
+      const srcBaseName = basename(srcFile).replace(/\.(scss|sass|css)$/, "");
+      const srcExt = extname(srcFile);  // .scss, .sass, .css
+      const targetDir = dirname(file.replace(srcDir, outDir));  // 输出 HTML 所在目录
+
+      // 匹配 href="..." 或 src="..." 中引用此样式文件的路径
+      // 支持: "styles.scss", "./styles.scss", "../styles.scss" 等
+      const escapedName = srcBaseName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const escapedExt = srcExt.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      content = content.replace(
+        new RegExp(
+          `(["'])((?:\\.\\/|(?:\\.\\.\\/)*)?)${escapedName}${escapedExt}(["'])`,
+          "g",
+        ),
+        (_match, q1, _prefix, q2) => {
+          const relOutput = relative(targetDir, outputFile);
+          return `${q1}${relOutput}${q2}`;
+        },
       );
     }
 
@@ -317,7 +400,7 @@ async function run() {
     const watcher = Bun.watch(
       resolve(process.argv[2] || "./"),
       async (event, filename) => {
-        if (filename && /\.(ts|js|html)$/.test(filename)) {
+        if (filename && /\.(ts|js|html|scss|sass|css)$/.test(filename)) {
           console.log(`✨ Detected change in ${filename}, rebuilding...`);
           await buildProject(srcDir, outDir);
         }

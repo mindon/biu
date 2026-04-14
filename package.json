@@ -8,6 +8,7 @@
     "html-minifier-next": "^6.1.2",
     "html-minifier-terser": "^7.2.0",
     "magic-string": "^0.30.21",
+    "sass": "^1.99.0",
     "typescript": "^6.0.2"
   }
 }
