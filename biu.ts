@@ -305,7 +305,7 @@ async function run() {
     i = 3;
   }
 
-  const srcDir = resolve(process.argv[i] || "./");
+  const srcDir = resolve(process.argv[i] || "./src");
   const outDir = resolve(process.argv[i + 1] || "./dist");
 
   if (isWatch) {
