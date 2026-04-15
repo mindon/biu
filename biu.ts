@@ -177,7 +177,7 @@ const basePlugin: Plugin = {
         /((?:import|from)\s+["'][^"']*?)[#\?][^"']*(["'])/g,
         "$1$2",
       );
-      const result: any = minifyHTMLLiterals(code);
+      const result: any = await minifyHTMLLiterals(code);
       return { contents: result ? result.code : code, loader: "ts" };
     });
   },
@@ -221,8 +221,8 @@ function createMainPlugin(moduleAbsPaths: Set<string>): Plugin {
           /(\b(?:import|from)\s+["'][^"']*?)[#?][^"']*(["'])/g,
           "$1$2",
         );
-        // const result = minifyHTMLLiterals(code);
-        return { contents: code, loader: "ts" };
+        const result: any = await minifyHTMLLiterals(code);
+        return { contents: result ? result.code : code, loader: "ts" };
       });
     },
   };
