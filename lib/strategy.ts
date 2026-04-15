@@ -1,10 +1,10 @@
-import CleanCSS, {OptionsOutput} from 'clean-css';
+import CleanCSS, { OptionsOutput } from "clean-css";
 import {
   OptimizationLevel,
   optimizationLevelFrom,
-} from 'clean-css/lib/options/optimization-level.js';
-import {MinifierOptions as HTMLOptions, minify} from 'html-minifier-next';
-import {TemplatePart} from './models.ts';
+} from "clean-css/lib/options/optimization-level.js";
+import { MinifierOptions as HTMLOptions, minify } from "html-minifier-next";
+import { TemplatePart } from "./models.ts";
 
 /**
  * A strategy on how to minify HTML and optionally CSS.
@@ -98,10 +98,10 @@ export const defaultStrategy: Strategy<HTMLOptions, CleanCSS.Options> = {
     // However, sometimes the semicolon can be removed (ex: inline styles).
     // In those cases, we want to make sure that the HTML splitting also
     // accounts for the missing semicolon.
-    const suffix = '();';
-    let placeholder = '@TEMPLATE_EXPRESSION';
+    const suffix = "();";
+    let placeholder = "@TEMPLATE_EXPRESSION";
     while (parts.some((part) => part.text.includes(placeholder + suffix))) {
-      placeholder += '_';
+      placeholder += "_";
     }
 
     return placeholder + suffix;
@@ -110,13 +110,13 @@ export const defaultStrategy: Strategy<HTMLOptions, CleanCSS.Options> = {
     return parts.map((part) => part.text).join(placeholder);
   },
   async minifyHTML(html, options = {}) {
-    let minifyCSSOptions: HTMLOptions['minifyCSS'];
+    let minifyCSSOptions: HTMLOptions["minifyCSS"];
     if (options.minifyCSS) {
       if (
         options.minifyCSS !== true &&
-        typeof options.minifyCSS !== 'function'
+        typeof options.minifyCSS !== "function"
       ) {
-        minifyCSSOptions = {...options.minifyCSS};
+        minifyCSSOptions = { ...options.minifyCSS };
       } else {
         minifyCSSOptions = {};
       }
@@ -143,7 +143,7 @@ export const defaultStrategy: Strategy<HTMLOptions, CleanCSS.Options> = {
       const matches = Array.from(result.matchAll(/<svg/g)).reverse();
       for (const match of matches) {
         const startTagIndex = match.index!;
-        const closeTagIndex = result.indexOf('</svg', startTagIndex);
+        const closeTagIndex = result.indexOf("</svg", startTagIndex);
         if (closeTagIndex < 0) {
           // Malformed SVG without a closing tag
           continue;
@@ -152,7 +152,7 @@ export const defaultStrategy: Strategy<HTMLOptions, CleanCSS.Options> = {
         const start = result.substring(0, startTagIndex);
         let svg = result.substring(startTagIndex, closeTagIndex);
         const end = result.substring(closeTagIndex);
-        svg = svg.replace(/\r?\n/g, '');
+        svg = svg.replace(/\r?\n/g, "");
         result = start + svg + end;
       }
     }
@@ -169,9 +169,9 @@ export const defaultStrategy: Strategy<HTMLOptions, CleanCSS.Options> = {
   },
   minifyCSS(css, options = {}) {
     const adjustedOptions = adjustMinifyCSSOptions(options);
-    const output = new CleanCSS(<OptionsOutput>adjustedOptions).minify(css);
+    const output = new CleanCSS(<OptionsOutput> adjustedOptions).minify(css);
     if (output.errors && output.errors.length) {
-      throw new Error(output.errors.join('\n\n'));
+      throw new Error(output.errors.join("\n\n"));
     }
 
     if (adjustedOptions.level[OptimizationLevel.One].tidySelectors) {
@@ -183,7 +183,7 @@ export const defaultStrategy: Strategy<HTMLOptions, CleanCSS.Options> = {
   splitHTMLByPlaceholder(html, placeholder) {
     const parts = html.split(placeholder);
     // Make the last character (a semicolon) optional. See above.
-    if (placeholder.endsWith(';')) {
+    if (placeholder.endsWith(";")) {
       const withoutSemicolon = placeholder.substring(0, placeholder.length - 1);
       for (let i = parts.length - 1; i >= 0; i--) {
         parts.splice(i, 1, ...parts[i].split(withoutSemicolon));
@@ -196,12 +196,11 @@ export const defaultStrategy: Strategy<HTMLOptions, CleanCSS.Options> = {
 
 export function adjustMinifyCSSOptions(options: CleanCSS.Options = {}) {
   const level = optimizationLevelFrom(options.level);
-  const originalTransform =
-    typeof options.level === 'object' &&
+  const originalTransform = typeof options.level === "object" &&
     options.level[1] &&
     options.level[1].transform;
   level[OptimizationLevel.One].transform = (property, value) => {
-    if (value.startsWith('@TEMPLATE_EXPRESSION') && !value.endsWith(';')) {
+    if (value.startsWith("@TEMPLATE_EXPRESSION") && !value.endsWith(";")) {
       // The CSS minifier has removed the semicolon from the placeholder
       // and we need to add it back.
       return (value = `${value};`);
@@ -225,10 +224,10 @@ function fixCleanCssTidySelectors(original: string, result: string) {
       continue;
     }
 
-    const parametersWithoutSpaces = parameters.replace(/\s/g, '');
+    const parametersWithoutSpaces = parameters.replace(/\s/g, "");
     const resultPseudoClass = pseudoClass.replace(
       parameters,
-      parametersWithoutSpaces
+      parametersWithoutSpaces,
     );
     const resultStartIndex = result.indexOf(resultPseudoClass);
     if (resultStartIndex < 0) {
@@ -237,8 +236,7 @@ function fixCleanCssTidySelectors(original: string, result: string) {
 
     const resultEndIndex = resultStartIndex + resultPseudoClass.length;
     // Restore the original pseudo class with spaces
-    result =
-      result.substring(0, resultStartIndex) +
+    result = result.substring(0, resultStartIndex) +
       pseudoClass +
       result.substring(resultEndIndex);
   }

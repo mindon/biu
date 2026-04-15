@@ -1,5 +1,5 @@
 // biu, a bundler for htmls with typescript, run with bun
-// bun build ./biu.ts --compile --minify --outfile=biu
+// bun build ./biu.ts --compile --minify --target=browser --outfile=biu
 // usage: biu [src-dir] [out-dir] [--watch]
 // use ?? to force import ts/js inline, e.g. import {my} from "my.ts??";
 

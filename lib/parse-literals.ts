@@ -1,5 +1,5 @@
-import {Template, Strategy} from './models.ts';
-import typescript from './typescript.ts';
+import { Strategy, Template } from "./models.ts";
+import typescript from "./typescript.ts";
 
 export interface ParseLiteralsOptions {
   fileName?: string;
@@ -8,10 +8,10 @@ export interface ParseLiteralsOptions {
 
 export function parseLiterals(
   source: string,
-  options: ParseLiteralsOptions = {}
+  options: ParseLiteralsOptions = {},
 ): Template[] {
   const strategy = {
-    ...(<Strategy<unknown>>typescript),
+    ...(<Strategy<unknown>> typescript),
     ...(options.strategy || {}),
   };
 

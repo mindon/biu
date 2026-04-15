@@ -1,17 +1,17 @@
-import ts from 'typescript';
-import {Strategy, TemplatePart} from './models.ts';
+import ts from "typescript";
+import { Strategy, TemplatePart } from "./models.ts";
 
 export interface TypescriptStrategy extends Strategy<ts.Node> {
   walkChildNodes(node: ts.Node, visit: (node: ts.Node) => void): void;
   getHeadTemplatePart(node: ts.TemplateLiteral | ts.TemplateHead): TemplatePart;
   getMiddleTailTemplatePart(
-    node: ts.TemplateMiddle | ts.TemplateTail
+    node: ts.TemplateMiddle | ts.TemplateTail,
   ): TemplatePart;
 }
 
 let currentRoot: ts.SourceFile | undefined;
-export default <TypescriptStrategy>{
-  getRootNode(source: string, fileName = ''): ts.SourceFile {
+export default <TypescriptStrategy> {
+  getRootNode(source: string, fileName = ""): ts.SourceFile {
     return ts.createSourceFile(fileName, source, ts.ScriptTarget.ESNext);
   },
   walkNodes(root: ts.SourceFile, visit: (node: ts.Node) => void) {
@@ -30,7 +30,7 @@ export default <TypescriptStrategy>{
     return node.tag.getText(currentRoot);
   },
   getTaggedTemplateTemplate(
-    node: ts.TaggedTemplateExpression
+    node: ts.TaggedTemplateExpression,
   ): ts.TemplateLiteral {
     return node.template;
   },
@@ -52,7 +52,7 @@ export default <TypescriptStrategy>{
   getHeadTemplatePart(node: ts.TemplateLiteral | ts.TemplateHead) {
     const fullText = node.getFullText(currentRoot);
     // ignore prefix spaces and comments
-    const startOffset = fullText.indexOf('`') + 1;
+    const startOffset = fullText.indexOf("`") + 1;
     const endOffset = ts.isTemplateHead(node) ? -2 : -1;
     return {
       text: fullText.slice(startOffset, fullText.length + endOffset),

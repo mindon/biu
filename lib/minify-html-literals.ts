@@ -1,7 +1,7 @@
-import MagicString, {SourceMapOptions} from 'magic-string';
-import {ParseLiteralsOptions, parseLiterals} from './parse-literals.ts';
-import {Template, TemplatePart} from './models.ts';
-import {Strategy, defaultMinifyOptions, defaultStrategy} from './strategy.ts';
+import MagicString, { SourceMapOptions } from "magic-string";
+import { parseLiterals, ParseLiteralsOptions } from "./parse-literals.ts";
+import { Template, TemplatePart } from "./models.ts";
+import { defaultMinifyOptions, defaultStrategy, Strategy } from "./strategy.ts";
 
 /**
  * Options for <code>minifyHTMLLiterals()</code>.
@@ -65,7 +65,7 @@ export interface BaseOptions {
    * strings are overridden. Use <code>generateSourceMap</code> if you want to
    * change how source maps are created.
    */
-  MagicString?: {new (source: string): MagicStringLike};
+  MagicString?: { new (source: string): MagicStringLike };
   /**
    * Override how template literals are parsed from a source string.
    */
@@ -177,7 +177,7 @@ export interface Result {
  */
 export function defaultGenerateSourceMap(
   ms: MagicStringLike,
-  fileName: string
+  fileName: string,
 ) {
   return ms.generateMap({
     file: `${fileName}.map`,
@@ -196,7 +196,7 @@ export function defaultGenerateSourceMap(
  */
 export function defaultShouldMinify(template: Template) {
   const tag = template.tag && template.tag.toLowerCase();
-  return !!tag && (tag.includes('html') || tag.includes('svg'));
+  return !!tag && (tag.includes("html") || tag.includes("svg"));
 }
 
 /**
@@ -208,7 +208,7 @@ export function defaultShouldMinify(template: Template) {
  * @returns true if the template should be minified
  */
 export function defaultShouldMinifyCSS(template: Template) {
-  return !!template.tag && template.tag.toLowerCase().includes('css');
+  return !!template.tag && template.tag.toLowerCase().includes("css");
 }
 
 /**
@@ -216,14 +216,14 @@ export function defaultShouldMinifyCSS(template: Template) {
  */
 export const defaultValidation: Validation = {
   ensurePlaceholderValid(placeholder) {
-    if (typeof placeholder !== 'string' || !placeholder.length) {
-      throw new Error('getPlaceholder() must return a non-empty string');
+    if (typeof placeholder !== "string" || !placeholder.length) {
+      throw new Error("getPlaceholder() must return a non-empty string");
     }
   },
   ensureHTMLPartsValid(parts, htmlParts) {
     if (parts.length !== htmlParts.length) {
       throw new Error(
-        'splitHTMLByPlaceholder() must return same number of strings as template parts'
+        "splitHTMLByPlaceholder() must return same number of strings as template parts",
       );
     }
   },
@@ -238,7 +238,7 @@ export const defaultValidation: Validation = {
  */
 export async function minifyHTMLLiterals(
   source: string,
-  options?: DefaultOptions
+  options?: DefaultOptions,
 ): Promise<Result | null>;
 /**
  * Minifies all HTML template literals in the provided source string.
@@ -249,11 +249,11 @@ export async function minifyHTMLLiterals(
  */
 export async function minifyHTMLLiterals<S extends Strategy>(
   source: string,
-  options?: CustomOptions<S>
+  options?: CustomOptions<S>,
 ): Promise<Result | null>;
 export async function minifyHTMLLiterals(
   source: string,
-  options: Options = {}
+  options: Options = {},
 ): Promise<Result | null> {
   options.minifyOptions = {
     ...defaultMinifyOptions,
@@ -277,14 +277,14 @@ export async function minifyHTMLLiterals(
   }
 
   options.parseLiteralsOptions = {
-    ...{fileName: options.fileName},
+    ...{ fileName: options.fileName },
     ...(options.parseLiteralsOptions || {}),
   } as Partial<ParseLiteralsOptions>;
 
   const templates = options.parseLiterals(source, options.parseLiteralsOptions);
-  const strategy =
-    <Strategy>(<CustomOptions<unknown>>options).strategy || defaultStrategy;
-  const {shouldMinify, shouldMinifyCSS} = options;
+  const strategy = <Strategy> (<CustomOptions<unknown>> options).strategy ||
+    defaultStrategy;
+  const { shouldMinify, shouldMinifyCSS } = options;
   let validate: Validation | undefined;
   if (options.validate !== false) {
     validate = options.validate || defaultValidation;
@@ -306,13 +306,14 @@ export async function minifyHTMLLiterals(
         const minifyCSSOptions = (
           (options as DefaultOptions).minifyOptions || {}
         ).minifyCSS;
-        if (typeof minifyCSSOptions === 'function') {
+        if (typeof minifyCSSOptions === "function") {
           min = minifyCSSOptions(combined);
         } else if (minifyCSSOptions === false) {
           min = combined;
         } else {
-          const cssOptions =
-            typeof minifyCSSOptions === 'object' ? minifyCSSOptions : undefined;
+          const cssOptions = typeof minifyCSSOptions === "object"
+            ? minifyCSSOptions
+            : undefined;
           min = strategy.minifyCSS!(combined, cssOptions);
         }
       } else {
@@ -339,9 +340,9 @@ export async function minifyHTMLLiterals(
   } else {
     let map: SourceMap | undefined;
     if (options.generateSourceMap !== false) {
-      const generateSourceMap =
-        options.generateSourceMap || defaultGenerateSourceMap;
-      map = generateSourceMap(ms, options.fileName || '');
+      const generateSourceMap = options.generateSourceMap ||
+        defaultGenerateSourceMap;
+      map = generateSourceMap(ms, options.fileName || "");
     }
 
     return {
