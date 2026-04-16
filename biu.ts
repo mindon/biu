@@ -102,7 +102,9 @@ async function processAssetFiles(
       const hash = contentHash(buf);
       const ext = extname(file);
       const name = basename(file, ext);
-      const outputName = `${name}-${hash}${ext}`;
+      const outputName = name == "favicon" && ext == ".ico"
+        ? `${name}${ext}`
+        : `${name}-${hash}${ext}`;
       const relDir = dirname(relative(srcDir, file));
       const outputDir = join(outDir, relDir);
       await mkdir(outputDir, { recursive: true });

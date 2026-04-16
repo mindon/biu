@@ -222,6 +222,7 @@ export const defaultValidation: Validation = {
   },
   ensureHTMLPartsValid(parts, htmlParts) {
     if (parts.length !== htmlParts.length) {
+      console.log(parts.length, htmlParts.length, parts, htmlParts);
       throw new Error(
         "splitHTMLByPlaceholder() must return same number of strings as template parts",
       );
