@@ -1,6 +1,6 @@
 // biu, a bundler for htmls with typescript, run with bun
-// bun build ./biu.ts --compile --minify --target=browser --outfile=biu
-// usage: biu [src-dir] [out-dir] [--watch]
+// self-compile: bun run biu.ts --build ./biu
+// usage: biu [src-dir] [out-dir] [--watch] [--static dir] [--serve port]
 // use ?? to force import ts/js inline, e.g. import {my} from "my.ts??";
 
 import { build, type Plugin } from "bun";
@@ -11,8 +11,8 @@ import { createHash } from "node:crypto";
 
 // updated from https://github.com/lit/lit/tree/main/packages/labs/rollup-plugin-minify-html-literals/src/lib
 import { minifyHTMLLiterals } from "./lib/minify-html-literals.ts";
-import { existsSync } from "node:fs";
-import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
+import { existsSync, watch } from "node:fs";
+import { cp, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 
 import { basename, dirname, extname, join, relative, resolve } from "node:path";
 
@@ -658,34 +658,209 @@ async function buildProject(srcDir: string, outDir: string) {
   );
 }
 
-async function run() {
-  const isWatch = process.argv.includes("--watch");
-  let i = 2;
-  if (process.argv[2] == "--watch") {
-    i = 3;
+/** 将 staticDir 下的所有内容复制到 outDir */
+async function copyStaticDir(staticDir: string, outDir: string) {
+  if (!existsSync(staticDir)) return;
+  await mkdir(outDir, { recursive: true });
+  await cp(staticDir, outDir, { recursive: true, force: true });
+  console.log(`📁 Static files copied: ${staticDir} -> ${outDir}`);
+}
+
+/** 解析命令行参数 */
+function parseArgs() {
+  const args = process.argv.slice(2);
+  if (args.length === 1) {
+    if (/^(-v|(--)?version)$/i.test(args[0])) {
+      return { version: VERSION };
+    }
+    if (/^(-h|(--)?(usage|help))$/i.test(args[0])) {
+      return { version: VERSION, usage: USAGE };
+    }
+  }
+  let srcDir = "./src";
+  let outDir = "./dist";
+  let isWatch = false;
+  let staticDir: string | null = "./static"; // 缺省值
+  let servePort: number | null = null;
+
+  const positional: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    switch (args[i]) {
+      case "--watch":
+        isWatch = true;
+        break;
+      case "--static":
+        staticDir = args[++i] ?? "./static";
+        break;
+      case "--serve": {
+        const next = args[i + 1];
+        servePort = next && !next.startsWith("-")
+          ? (i++, parseInt(next, 10))
+          : 3000;
+        isWatch = true; // --serve 隐含 watch 模式
+        break;
+      }
+      case "--build": {
+        const next = args[i + 1];
+        return { biu: next && !next.startsWith("-") ? (i++, next) : "./biu" };
+      }
+      default:
+        if (!args[i].startsWith("-")) positional.push(args[i]);
+        break;
+    }
   }
 
-  const srcDir = resolve(process.argv[i] || "./src");
-  const outDir = resolve(process.argv[i + 1] || "./dist");
+  if (positional.length >= 1) srcDir = positional[0];
+  if (positional.length >= 2) outDir = positional[1];
+
+  return {
+    srcDir: resolve(srcDir),
+    outDir: resolve(outDir),
+    isWatch,
+    staticDir: staticDir ? resolve(staticDir) : null,
+    servePort,
+  };
+}
+
+async function run() {
+  const {
+    srcDir,
+    outDir,
+    isWatch,
+    staticDir,
+    servePort,
+    biu,
+    version,
+    usage,
+    selfBuild,
+  } = parseArgs();
+  if (version) {
+    console.log(version);
+    if (usage) console.log(usage);
+    return;
+  }
+  console.log(`\n${VERSION}\n`);
+
+  // --build 模式：自编译为独立二进制
+  if (biu) {
+    const outFile = resolve(biu);
+    const selfPath = resolve(import.meta.dir, "biu.ts");
+    const args = [
+      "bun",
+      "build",
+      selfPath,
+      "--compile",
+      "--minify",
+      "--target",
+      "browser",
+      `--outfile=${outFile}`,
+    ];
+    console.log(`🔨 Self-compiling: ${args.join(" ")}`);
+    const proc = Bun.spawn(args, {
+      stdout: "inherit",
+      stderr: "inherit",
+    });
+    const exitCode = await proc.exited;
+    if (exitCode === 0) {
+      console.log(`✅ Binary created: ${outFile}`);
+    } else {
+      console.error(`❌ Build failed with exit code ${exitCode}`);
+    }
+    process.exit(exitCode);
+  }
+
+  /** 执行完整构建（含静态目录复制） */
+  async function fullBuild() {
+    if (staticDir && existsSync(staticDir)) {
+      await copyStaticDir(staticDir, outDir);
+    }
+    await buildProject(srcDir, outDir);
+  }
+
+  // 首次构建
+  await fullBuild();
 
   if (isWatch) {
     console.log("🚀 Watch mode enabled...");
-    // 首次构建
-    await buildProject(srcDir, outDir);
+
+    // 防抖：避免短时间内多次触发重建
+    let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+    let building = false;
+    const rebuild = (filename?: string) => {
+      if (debounceTimer) clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(async () => {
+        if (building) return;
+        building = true;
+        try {
+          console.log(
+            filename
+              ? `\n✨ Detected change in ${filename}, rebuilding...`
+              : "\n✨ Rebuilding...",
+          );
+          await fullBuild();
+        } catch (err) {
+          console.error("❌ Build error:", err);
+        } finally {
+          building = false;
+        }
+      }, 200);
+    };
 
     // 监听源目录
-    const watcher = Bun.watch(
-      resolve(process.argv[2] || "./"),
-      async (event, filename) => {
-        if (filename && !/node_modules|dist/.test(filename)) {
-          console.log(`✨ Detected change in ${filename}, rebuilding...`);
-          await buildProject(srcDir, outDir);
-        }
-      },
-    );
-  } else {
-    await buildProject(srcDir, outDir);
+    watch(srcDir, { recursive: true }, (_event, filename) => {
+      if (filename && !/node_modules|dist/.test(filename.toString())) {
+        rebuild(filename.toString());
+      }
+    });
+
+    // 同时监听 static 目录
+    if (staticDir && existsSync(staticDir)) {
+      watch(staticDir, { recursive: true }, (_event, filename) => {
+        rebuild(filename ? `static/${filename}` : undefined);
+      });
+      console.log(`👀 Watching static dir: ${staticDir}`);
+    }
+
+    // 启动静态文件服务
+    if (servePort) {
+      Bun.serve({
+        port: servePort,
+        async fetch(req) {
+          const url = new URL(req.url);
+          let pathname = decodeURIComponent(url.pathname);
+          // 默认 / → /index.html
+          if (pathname === "/") pathname = "/index.html";
+
+          const filePath = join(outDir, pathname);
+          const file = Bun.file(filePath);
+          if (await file.exists()) {
+            return new Response(file);
+          }
+          // SPA fallback: 如果请求没有扩展名，尝试 index.html
+          if (!extname(pathname)) {
+            const fallback = Bun.file(join(outDir, "index.html"));
+            if (await fallback.exists()) {
+              return new Response(fallback);
+            }
+          }
+          return new Response("Not Found", { status: 404 });
+        },
+      });
+      console.log(`🌐 Serving ${outDir} at http://localhost:${servePort}`);
+    }
   }
 }
-console.log("\nbiu v2026.0414\nusage: biu [src-dir] [out-dir] [--watch]\n\n");
+
+const VERSION = "biu v1.0.0 (2026.0417, https://mindon.dev)";
+const USAGE = `
+Usage: biu [options] [srcDir] [outDir]
+
+Options:
+  --watch           Watch mode
+  --static <dir>    Static directory (default: ./static)
+  --serve [port]    Serve static files (default port: 3000)
+  --build [outfile] Self-compile to binary (default: ./biu)
+  -v, --version     Show version
+  -h, --help        Show help
+`;
 run().catch(console.error);

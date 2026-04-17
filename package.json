@@ -1,5 +1,5 @@
 {
-  "name": "bun-minifier",
+  "name": "biu",
   "version": "1.0.0",
   "description": "Zero-config bun build tool with minify and module splitting",
   "main": "index.ts",
