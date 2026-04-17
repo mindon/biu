@@ -1,0 +1,105 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - target: bun-darwin-arm64
+            platform: darwin-arm64
+          - target: bun-darwin-x64
+            platform: darwin-x64
+          - target: bun-linux-x64
+            platform: linux-x64
+          - target: bun-linux-arm64
+            platform: linux-arm64
+          - target: bun-linux-x64-musl
+            platform: linux-x64-musl
+          - target: bun-linux-arm64-musl
+            platform: linux-arm64-musl
+          - target: bun-windows-x64
+            platform: windows-x64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Run tests
+        run: bun test src/
+
+      - name: Extract version from package.json
+        id: version
+        run: |
+          VERSION=$(bun -e "import pkg from './package.json'; console.log(pkg.version)")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "📦 Version: $VERSION"
+
+      - name: Build for ${{ matrix.platform }}
+        run: |
+          mkdir -p staging
+          if [[ "${{ matrix.platform }}" == windows-* ]]; then
+            OUTFILE="staging/biu.exe"
+          else
+            OUTFILE="staging/biu"
+          fi
+          bun build biu.ts \
+            --compile \
+            --minify \
+            --target ${{ matrix.target }} \
+            --outfile "$OUTFILE"
+
+      - name: Package zip
+        run: |
+          mkdir -p release
+          cp USAGE.md staging/
+          cd staging
+          ZIP_NAME="biu-v${{ steps.version.outputs.version }}-${{ matrix.platform }}.zip"
+          zip -r "../release/$ZIP_NAME" .
+          echo "📦 Created: $ZIP_NAME"
+        shell: bash
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: biu-${{ matrix.platform }}
+          path: ./release/*.zip
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ./artifacts
+
+      - name: Prepare release files
+        run: |
+          mkdir -p release
+          for dir in ./artifacts/*/; do
+            cp "$dir"*.zip ./release/ 2>/dev/null || true
+          done
+          ls -lh ./release/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: ./release/*.zip

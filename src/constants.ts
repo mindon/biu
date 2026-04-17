@@ -1,6 +1,9 @@
 // biu — constants & extension sets
 
-export const VERSION = "biu v1.0.2 (2026.0418, https://mindon.dev)";
+// 从 package.json 自动提取版本号（bun build --compile 时会被静态内联）
+import pkg from "../package.json";
+
+export const VERSION = `biu v${pkg.version} — https://github.com/mindon/biu`;
 
 export const USAGE = `
 Usage: biu [options] [srcDir] [outDir]

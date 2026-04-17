@@ -5,6 +5,8 @@ TypeScript/JavaScript, powered by [Bun](https://bun.sh/). It handles module
 splitting with custom import suffixes and provides built-in minification for
 HTML, CSS, and JS.
 
+project repository <https://github.com/mindon/biu>
+
 ## Features
 
 - **Zero-config**: Automatically scans and bundles your project.
