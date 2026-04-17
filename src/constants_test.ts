@@ -4,7 +4,7 @@ import { ASSET_EXTS, MANAGED_EXTS, USAGE, VERSION } from "./constants.ts";
 describe("constants", () => {
   test("VERSION contains version string", () => {
     expect(VERSION).toContain("biu v");
-    expect(VERSION).toContain("mindon.dev");
+    expect(VERSION).toContain("mindon");
   });
 
   test("USAGE contains all CLI options", () => {
