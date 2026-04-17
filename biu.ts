@@ -85,6 +85,15 @@ if (process.env.BIU_ASSETS_EXTS) {
     ASSET_EXTS.add(ext);
   }
 }
+const excludedRules = (() => {
+  const rules = process.env.BIU_EXCLUDED;
+  if (!rules) return;
+  try {
+    return new RegExp(rules, "i");
+  } catch (err) {
+    console.error(err);
+  }
+})();
 
 /**
  * 复制静态资源文件到 outDir，加上内容 hash
@@ -666,6 +675,37 @@ async function copyStaticDir(staticDir: string, outDir: string) {
   console.log(`📁 Static files copied: ${staticDir} -> ${outDir}`);
 }
 
+async function postProcess(outDir: string, postBuildScript?: string) {
+  if (!postBuildScript) return;
+  if (!/\.(ts|js|sh)$/.test(postBuildScript)) {
+    console.error(
+      `❌ Only .ts/.js or .sh scripts supported for post processing: ${postBuildScript}`,
+    );
+    return;
+  }
+  try {
+    const src = join(process.cwd(), postBuildScript);
+    if (/\.sh$/.test(postBuildScript)) {
+      const args = [src, outDir];
+      const proc = Bun.spawn(args, {
+        stdout: "inherit",
+        stderr: "inherit",
+      });
+      const exitCode = await proc.exited;
+      if (exitCode !== 0) {
+        console.error(`❌ Post processing failed with exit code ${exitCode}`);
+      }
+    } else {
+      const { run: runAferBuild } = await import(src);
+      console.log("\npost proccesing...");
+      console.log(src, `run = ${typeof runAferBuild}\n`);
+      await runAferBuild?.(outDir);
+    }
+  } catch (err) {
+    console.error(err);
+  }
+}
+
 /** 解析命令行参数 */
 function parseArgs() {
   const args = process.argv.slice(2);
@@ -682,23 +722,27 @@ function parseArgs() {
   let isWatch = false;
   let staticDir: string | null = "./static"; // 缺省值
   let servePort: number | null = null;
+  let postBuildScript: string | undefined;
 
   const positional: string[] = [];
   for (let i = 0; i < args.length; i++) {
     switch (args[i]) {
       case "--watch":
         isWatch = true;
-        break;
+        continue;
       case "--static":
         staticDir = args[++i] ?? "./static";
-        break;
+        continue;
+      case "--post-build":
+        postBuildScript = args[++i];
+        continue;
       case "--serve": {
         const next = args[i + 1];
         servePort = next && !next.startsWith("-")
           ? (i++, parseInt(next, 10))
           : 3000;
         isWatch = true; // --serve 隐含 watch 模式
-        break;
+        continue;
       }
       case "--build": {
         const next = args[i + 1];
@@ -706,7 +750,6 @@ function parseArgs() {
       }
       default:
         if (!args[i].startsWith("-")) positional.push(args[i]);
-        break;
     }
   }
 
@@ -719,6 +762,7 @@ function parseArgs() {
     isWatch,
     staticDir: staticDir ? resolve(staticDir) : null,
     servePort,
+    postBuildScript,
   };
 }
 
@@ -732,7 +776,7 @@ async function run() {
     biu,
     version,
     usage,
-    selfBuild,
+    postBuildScript,
   } = parseArgs();
   if (version) {
     console.log(version);
@@ -774,11 +818,14 @@ async function run() {
   }
 
   /** 执行完整构建（含静态目录复制） */
-  async function fullBuild() {
+  async function fullBuild(staticMode?: string) {
     if (staticDir && existsSync(staticDir)) {
       await copyStaticDir(staticDir, outDir);
     }
+    if (staticMode === "static") return;
     await buildProject(srcDir, outDir);
+
+    await postProcess(outDir, postBuildScript);
   }
 
   // 首次构建
@@ -786,11 +833,22 @@ async function run() {
 
   if (isWatch) {
     console.log("🚀 Watch mode enabled...");
+    const ignored = (filename?: string) => {
+      if (!filename) return true;
+      if (/node_modules|^dist(\/|$)/i.test(filename)) return true;
+      if (excludedRules?.test(filename)) return true;
+      console.log(
+        filename,
+        /node_modules|^dist(\/|$)/i.test(filename),
+        excludedRules?.test(filename),
+      );
+      return false;
+    };
 
     // 防抖：避免短时间内多次触发重建
     let debounceTimer: ReturnType<typeof setTimeout> | null = null;
     let building = false;
-    const rebuild = (filename?: string) => {
+    const rebuild = (filename?: string, staticMode?: string) => {
       if (debounceTimer) clearTimeout(debounceTimer);
       debounceTimer = setTimeout(async () => {
         if (building) return;
@@ -801,7 +859,7 @@ async function run() {
               ? `\n✨ Detected change in ${filename}, rebuilding...`
               : "\n✨ Rebuilding...",
           );
-          await fullBuild();
+          await fullBuild(staticMode);
         } catch (err) {
           console.error("❌ Build error:", err);
         } finally {
@@ -812,15 +870,14 @@ async function run() {
 
     // 监听源目录
     watch(srcDir, { recursive: true }, (_event, filename) => {
-      if (filename && !/node_modules|dist/.test(filename.toString())) {
-        rebuild(filename.toString());
-      }
+      if (!filename || ignored(filename.toString())) return;
+      rebuild(filename.toString());
     });
 
     // 同时监听 static 目录
     if (staticDir && existsSync(staticDir)) {
       watch(staticDir, { recursive: true }, (_event, filename) => {
-        rebuild(filename ? `static/${filename}` : undefined);
+        rebuild(filename ? filename.toString() : undefined, "static");
       });
       console.log(`👀 Watching static dir: ${staticDir}`);
     }
