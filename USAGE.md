@@ -79,4 +79,4 @@ biu --static ./public --post-build ./scripts/deploy.sh
 
 Full documentation: <https://github.com/mindon/biu>
 
-License: MIT — <https://github.com/mindon/biu/blob/master/LICENSE>
+License: MIT — <https://github.com/mindon/biu/blob/main/LICENSE>
