@@ -578,35 +578,43 @@ async function buildProject(srcDir: string, outDir: string) {
       let content = await processHtml(file);
       console.log(" ", relative(srcDir, file));
 
-      // 4a. 替换 JS 引用
+      // 4a. 替换 JS 引用（使用完整相对路径匹配，支持子目录）
+      const htmlSrcDirForJs = dirname(file);
+      const targetDirForJs = dirname(file.replace(srcDir, outDir));
       for (const [srcFile, outputFile] of sourceToOutput) {
-        const srcBaseName = basename(srcFile).replace(/\.(ts|js)$/, "");
-        const outputFileName = basename(outputFile);
-
+        const relFromHtml = relative(htmlSrcDirForJs, srcFile);
+        const escapedRelPath = relFromHtml.replace(
+          /[.*+?^${}()|[\]\\]/g,
+          "\\$&",
+        );
         content = content.replace(
           new RegExp(
-            `(["'])((?:\\.\\/|\\.\\.\\/)?)[^"']*${srcBaseName}(\\.(?:ts|js))([#\\?][^"']*)?(['"])`,
+            `(["'])(?:\\.\\/)?${escapedRelPath}([#\\?][^"']*)?(['"])`,
             "g",
           ),
-          `$1$2${outputFileName}$4$5`,
+          (_match, q1, extra, q2) => {
+            const relOutput = relative(targetDirForJs, outputFile);
+            return `${q1}${relOutput}${extra ?? ""}${q2}`;
+          },
         );
       }
 
-      // 4b. 替换 CSS/SCSS 引用
+      // 4b. 替换 CSS/SCSS 引用（使用完整相对路径匹配，支持子目录）
+      const htmlSrcDirForCss = dirname(file);
+      const targetDirForCss = dirname(file.replace(srcDir, outDir));
       for (const [srcFile, outputFile] of sourceToOutputCss) {
-        const srcBaseName = basename(srcFile).replace(/\.(scss|sass|css)$/, "");
-        const srcExt = extname(srcFile);
-        const targetDir = dirname(file.replace(srcDir, outDir));
-
-        const escapedName = srcBaseName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-        const escapedExt = srcExt.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        const relFromHtml = relative(htmlSrcDirForCss, srcFile);
+        const escapedRelPath = relFromHtml.replace(
+          /[.*+?^${}()|[\]\\]/g,
+          "\\$&",
+        );
         content = content.replace(
           new RegExp(
-            `(["'])((?:\\.\\/|(?:\\.\\.\\/)*)?)${escapedName}${escapedExt}(["'])`,
+            `(["'])(?:\\.\\/)?${escapedRelPath}(["'])`,
             "g",
           ),
-          (_match, q1, _prefix, q2) => {
-            const relOutput = relative(targetDir, outputFile);
+          (_match, q1, q2) => {
+            const relOutput = relative(targetDirForCss, outputFile);
             return `${q1}${relOutput}${q2}`;
           },
         );
