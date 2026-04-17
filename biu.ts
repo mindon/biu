@@ -745,6 +745,10 @@ async function run() {
   if (biu) {
     const outFile = resolve(biu);
     const selfPath = resolve(import.meta.dir, "biu.ts");
+    if (!existsSync(selfPath)) {
+      console.error(`❌ Self-build failed: ${selfPath} not found`);
+      process.exit(1);
+    }
     const args = [
       "bun",
       "build",

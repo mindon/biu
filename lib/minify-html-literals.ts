@@ -308,7 +308,7 @@ export async function minifyHTMLLiterals(
           (options as DefaultOptions).minifyOptions || {}
         ).minifyCSS;
         if (typeof minifyCSSOptions === "function") {
-          min = minifyCSSOptions(combined);
+          min = await minifyCSSOptions(combined);
         } else if (minifyCSSOptions === false) {
           min = combined;
         } else {
