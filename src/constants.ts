@@ -1,6 +1,6 @@
 // biu — constants & extension sets
 
-export const VERSION = "biu v1.0.1 (2026.0417, https://mindon.dev)";
+export const VERSION = "biu v1.0.2 (2026.0418, https://mindon.dev)";
 
 export const USAGE = `
 Usage: biu [options] [srcDir] [outDir]
