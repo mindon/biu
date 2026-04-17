@@ -3,7 +3,7 @@
 // usage: biu [src-dir] [out-dir] [--watch] [--static dir] [--serve port]
 // use ?? to force import ts/js inline, e.g. import {my} from "my.ts??";
 
-import { build, type Plugin } from "bun";
+import { $, build, type Plugin } from "bun";
 import { minify as minifyHtml } from "html-minifier-terser";
 import CleanCSS from "clean-css";
 import * as sass from "sass";
@@ -17,6 +17,7 @@ import { cp, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { basename, dirname, extname, join, relative, resolve } from "node:path";
 
 const cleanCss = new CleanCSS();
+const cwd = process.cwd();
 
 /** 生成内容 hash（取前8位），用于输出文件名 */
 function contentHash(content: string | Buffer, len = 8): string {
@@ -672,10 +673,14 @@ async function copyStaticDir(staticDir: string, outDir: string) {
   if (!existsSync(staticDir)) return;
   await mkdir(outDir, { recursive: true });
   await cp(staticDir, outDir, { recursive: true, force: true });
-  console.log(`📁 Static files copied: ${staticDir} -> ${outDir}`);
+  console.log(
+    `📁 Static files copied: ${relative(cwd, staticDir)} -> ${
+      relative(cwd, outDir)
+    }`,
+  );
 }
 
-async function postProcess(outDir: string, postBuildScript?: string) {
+async function postBuild(outDir: string, postBuildScript?: string) {
   if (!postBuildScript) return;
   if (!/\.(ts|js|sh)$/.test(postBuildScript)) {
     console.error(
@@ -684,25 +689,27 @@ async function postProcess(outDir: string, postBuildScript?: string) {
     return;
   }
   try {
-    const src = join(process.cwd(), postBuildScript);
+    const src = resolve(cwd, postBuildScript);
+    if (!existsSync(src)) {
+      console.error(`❌ Post-build script not found: ${src}`);
+      return;
+    }
+    console.log("\n⚙️  Post-build processing...");
     if (/\.sh$/.test(postBuildScript)) {
-      const args = [src, outDir];
-      const proc = Bun.spawn(args, {
-        stdout: "inherit",
-        stderr: "inherit",
-      });
-      const exitCode = await proc.exited;
-      if (exitCode !== 0) {
-        console.error(`❌ Post processing failed with exit code ${exitCode}`);
-      }
+      console.log(
+        `  Running: sh ${relative(cwd, src)} ${relative(cwd, outDir)}`,
+      );
+      console.log();
+      await $`sh ${src} ${outDir}`;
     } else {
       const { run: runAferBuild } = await import(src);
-      console.log("\npost proccesing...");
-      console.log(src, `run = ${typeof runAferBuild}\n`);
+      console.log(`  ${relative(cwd, src)}, run = ${typeof runAferBuild}`);
+      console.log();
       await runAferBuild?.(outDir);
     }
+    console.info("🆗 Post build done!\n");
   } catch (err) {
-    console.error(err);
+    console.error("❌ Post-build error:", err);
   }
 }
 
@@ -729,20 +736,20 @@ function parseArgs() {
     switch (args[i]) {
       case "--watch":
         isWatch = true;
-        continue;
+        break;
       case "--static":
         staticDir = args[++i] ?? "./static";
-        continue;
+        break;
       case "--post-build":
         postBuildScript = args[++i];
-        continue;
+        break;
       case "--serve": {
         const next = args[i + 1];
         servePort = next && !next.startsWith("-")
           ? (i++, parseInt(next, 10))
           : 3000;
         isWatch = true; // --serve 隐含 watch 模式
-        continue;
+        break;
       }
       case "--build": {
         const next = args[i + 1];
@@ -750,6 +757,7 @@ function parseArgs() {
       }
       default:
         if (!args[i].startsWith("-")) positional.push(args[i]);
+        break;
     }
   }
 
@@ -817,6 +825,8 @@ async function run() {
     process.exit(exitCode);
   }
 
+  console.log(`-- Working directory: ${cwd} --\n`);
+
   /** 执行完整构建（含静态目录复制） */
   async function fullBuild(staticMode?: string) {
     if (staticDir && existsSync(staticDir)) {
@@ -825,7 +835,7 @@ async function run() {
     if (staticMode === "static") return;
     await buildProject(srcDir, outDir);
 
-    await postProcess(outDir, postBuildScript);
+    await postBuild(outDir, postBuildScript);
   }
 
   // 首次构建
@@ -879,7 +889,7 @@ async function run() {
       watch(staticDir, { recursive: true }, (_event, filename) => {
         rebuild(filename ? filename.toString() : undefined, "static");
       });
-      console.log(`👀 Watching static dir: ${staticDir}`);
+      console.log(`👀 Watching static dir: ${relative(cwd, staticDir)}`);
     }
 
     // 启动静态文件服务
@@ -907,21 +917,24 @@ async function run() {
           return new Response("Not Found", { status: 404 });
         },
       });
-      console.log(`🌐 Serving ${outDir} at http://localhost:${servePort}`);
+      console.log(
+        `🌐 Serving ${relative(cwd, outDir)} at http://localhost:${servePort}`,
+      );
     }
   }
 }
 
-const VERSION = "biu v1.0.0 (2026.0417, https://mindon.dev)";
+const VERSION = "biu v1.0.1 (2026.0417, https://mindon.dev)";
 const USAGE = `
 Usage: biu [options] [srcDir] [outDir]
 
 Options:
-  --watch           Watch mode
-  --static <dir>    Static directory (default: ./static)
-  --serve [port]    Serve static files (default port: 3000)
-  --build [outfile] Self-compile to binary (default: ./biu)
-  -v, --version     Show version
-  -h, --help        Show help
+  --watch              Watch mode
+  --static <dir>       Static directory (default: ./static)
+  --post-build <file>  Run .sh/.ts/.js script after build (receives outDir as $1)
+  --serve [port]       Serve static files (default port: 3000)
+  --build [outfile]    Self-compile to binary (default: ./biu)
+  -v, --version        Show version
+  -h, --help           Show help
 `;
 run().catch(console.error);

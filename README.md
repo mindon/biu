@@ -57,7 +57,7 @@ biu [src-dir] [out-dir] [--watch] [--static dir] [--serve port] [--build outfile
 - `--static dir`: Specify a static assets directory to copy as-is into the
   output (default: `./static`). If the directory exists, its contents are copied
   before each build. In watch mode the static directory is also monitored.
-- `--post-build script`: module .ts/.js or shell script to run after the build
+- `--post-build <file>`: module .ts/.js or shell script to run after the build
 - `--serve port`: Start a static file server for the output directory on the
   given port (default: `3000` when no port is specified). Implies `--watch`.
 - `--build outfile`: Self-compile `biu.ts` into a standalone binary at the given
