@@ -1,2 +1,3 @@
 import "./inline.ts??";
-console.log(123);
+import { hello } from "./auto-inline-bundling.ts";
+console.log(hello);

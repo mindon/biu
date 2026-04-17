@@ -8,8 +8,9 @@ HTML, CSS, and JS.
 ## Features
 
 - **Zero-config**: Automatically scans and bundles your project.
-- **Module Splitting**: Handle modules independently using `?module` suffixes.
-- **Inline Imports**: Force inline bundling with `??` suffixes.
+- **Smart Module Splitting**: TS/JS files whose basename appears in any HTML are
+  built as independent modules; others are automatically inlined.
+- **Force Inline (`??`)**: Use the `??` import suffix to force inline bundling.
 - **Minification**: Built-in minification for HTML, CSS/SCSS, and
   TypeScript/JavaScript (including HTML template literals).
 - **Content Hashing**: Output filenames include content hash for cache busting.
@@ -43,19 +44,19 @@ demo-project/                   ← Example project for testing
 
 ### Module Dependencies (bottom-up)
 
-| Module | Responsibility | Dependencies |
-|---|---|---|
-| `constants` | Constants & config | — |
-| `utils` | Base utilities | — |
-| `cli` | Argument parsing | constants |
-| `styles` | CSS processing | utils |
-| `html` | HTML processing | styles |
-| `assets` | Asset processing | utils |
-| `plugins` | Build plugins | minify-html-literals |
-| `post-build` | Post-build scripts | — |
-| `server` | Watch / Serve | constants |
-| `builder` | Core build | utils, constants, styles, assets, plugins, html |
-| **`biu.ts`** | **Entry point** | cli, constants, builder, assets, post-build, server |
+| Module       | Responsibility     | Dependencies                                        |
+| ------------ | ------------------ | --------------------------------------------------- |
+| `constants`  | Constants & config | —                                                   |
+| `utils`      | Base utilities     | —                                                   |
+| `cli`        | Argument parsing   | constants                                           |
+| `styles`     | CSS processing     | utils                                               |
+| `html`       | HTML processing    | styles                                              |
+| `assets`     | Asset processing   | utils                                               |
+| `plugins`    | Build plugins      | minify-html-literals                                |
+| `post-build` | Post-build scripts | —                                                   |
+| `server`     | Watch / Serve      | constants                                           |
+| `builder`    | Core build         | utils, constants, styles, assets, plugins, html     |
+| **`biu.ts`** | **Entry point**    | cli, constants, builder, assets, post-build, server |
 
 ## Installation & Compilation
 
@@ -163,14 +164,23 @@ biu --serve 3000
 
 ## Advanced Imports
 
-`biu` supports special suffixes to control bundling behavior:
+`biu` supports smart module splitting based on basename visibility in HTML:
 
-- **Independent Module**: By default, linked `.ts` or `.js` files are treated as
-  independent modules — each gets its own hashed output file.
-- **Force Inline**: Use `??` suffix to force a module to be bundled inline:
+- **Independent module**: If a `.ts`/`.js` file's **basename** (e.g. `main.ts`)
+  appears anywhere in any HTML file's content, it is built as an **independent
+  module** with its own hashed output file.
+- **Auto inline**: If the basename never appears in any HTML, and the file is
+  imported by another `.ts`/`.js`, it is **automatically inlined** into its
+  importer — no separate output file is generated.
+- **Force inline (`??`)**: Use the `??` suffix to force a module to be bundled
+  inline regardless of whether its basename appears in HTML:
   ```typescript
-  import { myModule } from "./utils.ts??";
+  import { myUtil } from "./utils.ts??";
   ```
+
+This means you typically don't need to think about bundling strategy — files
+mentioned in HTML get their own output, and pure helper/utility modules are
+automatically bundled into the files that use them.
 
 ## Static Directory
 

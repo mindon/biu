@@ -13,11 +13,17 @@ import { processHtml } from "./html.ts";
 
 /**
  * 递归解析 JS/TS 依赖
+ *
+ * htmlRawContents: 所有 HTML 文件的原始内容拼接字符串。
+ * 判断规则：如果某个 ts/js 文件的 basename（如 "name.ts"）在任意 HTML 文件内容中
+ * 从未出现过，且它被其他 ts/js import 了，则自动内联到 importer 中；
+ * 否则保持为独立模块输出。
  */
 async function resolveDependencies(
   initial: string[],
   initialModules: string[],
   jsFiles: string[],
+  htmlRawContents: string,
 ): Promise<
   {
     entrypoints: string[];
@@ -43,10 +49,15 @@ async function resolveDependencies(
       );
       if (jsFiles.includes(depPath)) {
         if (/\?\?/.test(fullPath)) {
+          // ?? suffix → force inline
           deps.add(depPath);
-        } else {
+        } else if (htmlRawContents.includes(basename(depPath))) {
+          // basename 出现在某个 HTML 中 → 独立模块
           modules.add(depPath);
           if (match[3]) extras[depPath] = match[3];
+        } else {
+          // basename 未在任何 HTML 中出现 → auto inline
+          deps.add(depPath);
         }
         if (!queue.includes(depPath)) queue.push(depPath);
       }
@@ -346,9 +357,12 @@ export async function buildProject(srcDir: string, outDir: string) {
       content: await readFile(htmlFile, "utf8"),
     })),
   );
+  // 拼接所有 HTML 原始内容，用于 basename 出现检测
+  const htmlRawContents = htmlContents.map((h) => h.content).join("\n");
+
   for (const { file: htmlFile, content: htmlContent } of htmlContents) {
     const matches = htmlContent.matchAll(
-      /(?:src|import|from)\s*[:=]\s*["'](\.?\/?.*?\.(ts|js)([#\?][^"']*)?)["']/g,
+      /(?:src|import|from)\s*[:=]?\s*["'](\.?\/?.*?\.(ts|js)([#\?][^"']*)?)["']/g,
     );
     for (const match of matches) {
       const fullPath = match[1];
@@ -366,6 +380,7 @@ export async function buildProject(srcDir: string, outDir: string) {
     initialEntries,
     initialModules,
     jsFiles,
+    htmlRawContents,
   );
 
   // 构建 JS/TS
