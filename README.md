@@ -25,7 +25,8 @@ binary for portability.
 
 1. Ensure you have [Bun](https://bun.sh/) installed.
 2. Clone the repository and navigate to the directory.
-3. Compile with the built-in `--build` command:
+3. Prepare dependencies: `bun i # install dependencies`
+4. Compile with the built-in `--build` command:
 
 ```bash
 # Self-compile to ./biu (default)
