@@ -1,9 +1,9 @@
 # biu
 
 `biu` is a zero-config, high-performance bundler for HTML files with
-TypeScript/JavaScript, powered by [Bun](https://bun.sh/). It is designed to
-handle module splitting with custom import suffixes and provides built-in
-minification for HTML, CSS, and JS.
+TypeScript/JavaScript, powered by [Bun](https://bun.sh/). It handles module
+splitting with custom import suffixes and provides built-in minification for
+HTML, CSS, and JS.
 
 ## Features
 
@@ -16,7 +16,46 @@ minification for HTML, CSS, and JS.
 - **Static Directory**: Copy unprocessed static assets directly to the output.
 - **Watch Mode**: Live rebuilds on file changes with debounce.
 - **Dev Server**: Built-in static file server with SPA fallback.
+- **Post-build Scripts**: Run custom `.sh`/`.ts`/`.js` scripts after each build.
+- **Self-compile**: Build a standalone binary with a single command.
 - **Fast**: Built on the lightning-fast Bun runtime.
+
+## Project Structure
+
+```
+biu.ts                          ← Main entry (~95 lines), orchestrates all modules
+src/
+├── constants.ts                ← Version, USAGE, extension sets, env vars
+├── utils.ts                    ← Utilities (contentHash, recursive scan)
+├── cli.ts                      ← CLI argument parsing
+├── styles.ts                   ← CSS/SCSS compilation & minification
+├── assets.ts                   ← Static asset processing & copying
+├── plugins.ts                  ← Bun build plugins (base + main)
+├── html.ts                     ← HTML processing & minification
+├── builder.ts                  ← Core build logic (deps, modules, path rewriting)
+├── post-build.ts               ← Post-build script execution
+├── server.ts                   ← Watch mode & dev server
+├── *_test.ts                   ← Test files for each module
+plugins/
+└── minify-html-literals/       ← HTML template literal minifier (vendored)
+demo-project/                   ← Example project for testing
+```
+
+### Module Dependencies (bottom-up)
+
+| Module | Responsibility | Dependencies |
+|---|---|---|
+| `constants` | Constants & config | — |
+| `utils` | Base utilities | — |
+| `cli` | Argument parsing | constants |
+| `styles` | CSS processing | utils |
+| `html` | HTML processing | styles |
+| `assets` | Asset processing | utils |
+| `plugins` | Build plugins | minify-html-literals |
+| `post-build` | Post-build scripts | — |
+| `server` | Watch / Serve | constants |
+| `builder` | Core build | utils, constants, styles, assets, plugins, html |
+| **`biu.ts`** | **Entry point** | cli, constants, builder, assets, post-build, server |
 
 ## Installation & Compilation
 
@@ -25,21 +64,20 @@ binary for portability.
 
 1. Ensure you have [Bun](https://bun.sh/) installed.
 2. Clone the repository and navigate to the directory.
-3. Prepare dependencies: `bun i # install dependencies`
+3. Prepare dependencies: `bun i`
 4. Compile with the built-in `--build` command:
 
 ```bash
-# Self-compile to ./biu (default)
+# Self-compile to ./bin/biu (default)
 bun run biu.ts --build
 
 # Specify output path
-bun run biu.ts --build ./biu
+bun run biu.ts --build ./bin/biu
 bun run biu.ts --build /usr/local/bin/biu
 ```
 
-Bun's auto-install will fetch any missing dependencies automatically — no
-`bun install` or `package.json` required. The resulting binary is fully
-standalone.
+Bun's auto-install will fetch any missing dependencies automatically. The
+resulting binary is fully standalone.
 
 ## Usage
 
@@ -48,7 +86,7 @@ Run the `biu` binary or use `bun run` directly.
 ### Command Syntax
 
 ```bash
-biu [src-dir] [out-dir] [--watch] [--static dir] [--serve port] [--build outfile]
+biu [src-dir] [out-dir] [--watch] [--static dir] [--serve port] [--post-build file] [--build outfile]
 ```
 
 - `src-dir`: The source directory (default: `./src`).
@@ -57,11 +95,15 @@ biu [src-dir] [out-dir] [--watch] [--static dir] [--serve port] [--build outfile
 - `--static dir`: Specify a static assets directory to copy as-is into the
   output (default: `./static`). If the directory exists, its contents are copied
   before each build. In watch mode the static directory is also monitored.
-- `--post-build <file>`: module .ts/.js or shell script to run after the build
-- `--serve port`: Start a static file server for the output directory on the
+- `--post-build <file>`: Module `.ts`/`.js` or shell script to run after each
+  build. Receives the output directory as the first argument (`$1`).
+- `--serve [port]`: Start a static file server for the output directory on the
   given port (default: `3000` when no port is specified). Implies `--watch`.
-- `--build outfile`: Self-compile `biu.ts` into a standalone binary at the given
-  path (default: `./biu`). Uses `bun build --compile --minify` under the hood.
+- `--build [outfile]`: Self-compile `biu.ts` into a standalone binary at the
+  given path (default: `./biu`). Uses `bun build --compile --minify` under the
+  hood.
+- `-v, --version`: Show version info.
+- `-h, --help`: Show help / usage.
 
 Options can appear in any order.
 
@@ -70,6 +112,7 @@ Options can appear in any order.
 **Basic build:**
 
 ```bash
+cd demo-project
 biu ./src ./dist
 ```
 
@@ -91,17 +134,30 @@ biu --serve 8080
 biu ./src ./dist --static ./public --serve 4000
 ```
 
+**Post-build script:**
+
+```bash
+biu --post-build ./scripts/deploy.sh
+```
+
 **Compile to binary and run:**
 
 ```bash
-bun run biu.ts --build ./biu
-./biu --serve 3000
+# From the biu repo
+bun run biu.ts --build bin/biu
+export PATH=$PATH:`pwd`/bin
+
+# From a project directory
+cd demo-project
+biu --serve 3000
 ```
 
-**Cross-compile or install globally:**
+**Install globally:**
 
 ```bash
 bun run biu.ts --build /usr/local/bin/biu
+
+cd demo-project
 biu --serve 3000
 ```
 
@@ -152,6 +208,27 @@ separated by commas, spaces, or semicolons.
 ```bash
 BIU_ASSETS_EXTS=".glb .gltf .hdr" biu
 BIU_ASSETS_EXTS="glb,gltf,hdr" biu
+```
+
+### `BIU_EXCLUDED`
+
+A regex pattern to exclude files from processing. Case-insensitive.
+
+```bash
+BIU_EXCLUDED="test|spec" biu
+```
+
+## Testing
+
+Tests are written with Bun's built-in test runner. Each module in `src/` has a
+corresponding `*_test.ts` file.
+
+```bash
+# Run all tests
+bun test src/
+
+# Run a specific test file
+bun test src/html_test.ts
 ```
 
 ## License
