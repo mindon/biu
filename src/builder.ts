@@ -405,7 +405,7 @@ export async function buildProject(srcDir: string, outDir: string) {
         outdir: join(outDir, dirname(file.replace(srcDir, ""))),
         minify: true,
         target: "browser",
-        naming: "[name]-[hash].js",
+        naming: "[name].[hash].js",
         plugins: [plugin],
       });
       for (const output of res.outputs) {
