@@ -4,8 +4,8 @@
 // usage: biu [src-dir] [out-dir] [--watch] [--static dir] [--serve port]
 // use ?? to force import ts/js inline, e.g. import {my} from "my.ts??";
 
-import { existsSync } from "node:fs";
-import { resolve } from "node:path";
+import { existsSync, lstatSync } from "node:fs";
+import { join, resolve } from "node:path";
 
 import { VERSION } from "./src/constants.ts";
 import { parseArgs } from "./src/cli.ts";
@@ -38,7 +38,12 @@ async function run() {
 
   // --build 模式：自编译为独立二进制
   if (biu) {
-    const outFile = resolve(biu);
+    let outFile = resolve(biu);
+    try { // auto add default file name if a directory
+      if (lstatSync(outFile)?.isDirectory()) {
+        outFile = join(outFile, "biu");
+      }
+    } catch {}
     const selfPath = resolve(import.meta.dir, "biu.ts");
     if (!existsSync(selfPath)) {
       console.error(`❌ Self-build failed: ${selfPath} not found`);
