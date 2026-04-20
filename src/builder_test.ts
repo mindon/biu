@@ -19,17 +19,17 @@ describe("buildProject — integration", () => {
         new Bun.Glob("**/*.js").scan(tmpOut),
       );
       expect(jsFiles.length).toBeGreaterThanOrEqual(3); // main, test, demo, hello
-      expect(jsFiles.some((f) => f.startsWith("main-"))).toBe(true);
-      expect(jsFiles.some((f) => f.startsWith("test-"))).toBe(true);
-      expect(jsFiles.some((f) => f.startsWith("demo-"))).toBe(true);
+      expect(jsFiles.some((f) => /^main[.\-]/.test(f))).toBe(true);
+      expect(jsFiles.some((f) => /^test[.\-]/.test(f))).toBe(true);
+      expect(jsFiles.some((f) => /^demo[.\-]/.test(f))).toBe(true);
 
       // CSS outputs
       const cssFiles = await Array.fromAsync(
         new Bun.Glob("**/*.css").scan(tmpOut),
       );
       expect(cssFiles.length).toBeGreaterThanOrEqual(2);
-      expect(cssFiles.some((f) => f.includes("styles-"))).toBe(true);
-      expect(cssFiles.some((f) => f.includes("hey-"))).toBe(true);
+      expect(cssFiles.some((f) => /styles[.\-]/.test(f))).toBe(true);
+      expect(cssFiles.some((f) => /hey[.\-]/.test(f))).toBe(true);
 
       // HTML outputs
       expect(existsSync(join(tmpOut, "index.html"))).toBe(true);
@@ -41,7 +41,7 @@ describe("buildProject — integration", () => {
       const pngFiles = await Array.fromAsync(
         new Bun.Glob("**/*.png").scan(tmpOut),
       );
-      expect(pngFiles.some((f) => f.includes("mindon-"))).toBe(true);
+      expect(pngFiles.some((f) => /mindon[.\-]/.test(f))).toBe(true);
     } finally {
       await rm(tmpOut, { recursive: true, force: true });
     }
@@ -54,12 +54,12 @@ describe("buildProject — integration", () => {
       const indexHtml = await readFile(join(tmpOut, "index.html"), "utf8");
       // Should reference hashed JS, not original .ts
       expect(indexHtml).not.toContain(".ts");
-      expect(indexHtml).toMatch(/main-[0-9a-z]+\.js/);
-      expect(indexHtml).toMatch(/hello-[0-9a-z]+\.js/);
+      expect(indexHtml).toMatch(/main[.\-][0-9a-z]+\.js/);
+      expect(indexHtml).toMatch(/hello[.\-][0-9a-z]+\.js/);
 
       // Should reference hashed CSS, not original .scss
       expect(indexHtml).not.toContain(".scss");
-      expect(indexHtml).toMatch(/styles-[0-9a-f]+\.css/);
+      expect(indexHtml).toMatch(/styles[.\-][0-9a-f]+\.css/);
     } finally {
       await rm(tmpOut, { recursive: true, force: true });
     }
@@ -70,7 +70,7 @@ describe("buildProject — integration", () => {
       await buildProject(demoSrc, tmpOut);
 
       const cssFiles = await Array.fromAsync(
-        new Bun.Glob("styles-*.css").scan(tmpOut),
+        new Bun.Glob("styles[-.]*.css").scan(tmpOut),
       );
       expect(cssFiles.length).toBe(1);
       const css = await readFile(join(tmpOut, cssFiles[0]), "utf8");
@@ -88,12 +88,12 @@ describe("buildProject — integration", () => {
       await buildProject(demoSrc, tmpOut);
 
       const cssFiles = await Array.fromAsync(
-        new Bun.Glob("styles-*.css").scan(tmpOut),
+        new Bun.Glob("styles[-.]*.css").scan(tmpOut),
       );
       const css = await readFile(join(tmpOut, cssFiles[0]), "utf8");
       // url() should point to hashed asset, not original
       expect(css).not.toContain("mindon.png");
-      expect(css).toMatch(/mindon-[0-9a-f]+\.png/);
+      expect(css).toMatch(/mindon[.\-][0-9a-f]+\.png/);
     } finally {
       await rm(tmpOut, { recursive: true, force: true });
     }
@@ -108,9 +108,9 @@ describe("buildProject — integration", () => {
         "utf8",
       );
       // Should reference parent dir CSS/JS with correct relative paths
-      expect(worldHtml).toMatch(/styles-[0-9a-f]+\.css/);
-      expect(worldHtml).toMatch(/hello-[0-9a-z]+\.js/);
-      expect(worldHtml).toMatch(/demo-[0-9a-z]+\.js/);
+      expect(worldHtml).toMatch(/styles[.\-][0-9a-f]+\.css/);
+      expect(worldHtml).toMatch(/hello[.\-][0-9a-z]+\.js/);
+      expect(worldHtml).toMatch(/demo[.\-][0-9a-z]+\.js/);
     } finally {
       await rm(tmpOut, { recursive: true, force: true });
     }
@@ -150,12 +150,12 @@ describe("buildProject — auto-inline", () => {
       new Bun.Glob("**/*.js").scan(tmpInlineOut),
     );
     // Only app-xxx.js should exist, no helper-xxx.js
-    expect(jsFiles.some((f) => f.startsWith("app-"))).toBe(true);
-    expect(jsFiles.some((f) => f.startsWith("helper-"))).toBe(false);
+    expect(jsFiles.some((f) => /^app[.\-]/.test(f))).toBe(true);
+    expect(jsFiles.some((f) => /^helper[.\-]/.test(f))).toBe(false);
 
     // The inlined content should be inside app's output
     const appJs = await readFile(
-      join(tmpInlineOut, jsFiles.find((f) => f.startsWith("app-"))!),
+      join(tmpInlineOut, jsFiles.find((f) => /^app[.\-]/.test(f))!),
       "utf8",
     );
     expect(appJs).toContain("hello");
@@ -184,8 +184,8 @@ describe("buildProject — auto-inline", () => {
     const jsFiles = await Array.fromAsync(
       new Bun.Glob("**/*.js").scan(tmpInlineOut),
     );
-    expect(jsFiles.some((f) => f.startsWith("app-"))).toBe(true);
-    expect(jsFiles.some((f) => f.startsWith("lib-"))).toBe(true);
+    expect(jsFiles.some((f) => /^app[.\-]/.test(f))).toBe(true);
+    expect(jsFiles.some((f) => /^lib[.\-]/.test(f))).toBe(true);
   });
 
   test("basename in inline script import → separate module", async () => {
@@ -214,7 +214,7 @@ describe("buildProject — auto-inline", () => {
     const jsFiles = await Array.fromAsync(
       new Bun.Glob("**/*.js").scan(tmpInlineOut),
     );
-    expect(jsFiles.some((f) => f.startsWith("shared-"))).toBe(true);
+    expect(jsFiles.some((f) => /^shared[.\-]/.test(f))).toBe(true);
   });
 
   test("?? suffix forces inline even if basename is in HTML", async () => {
@@ -240,11 +240,11 @@ describe("buildProject — auto-inline", () => {
     const jsFiles = await Array.fromAsync(
       new Bun.Glob("**/*.js").scan(tmpInlineOut),
     );
-    expect(jsFiles.some((f) => f.startsWith("app-"))).toBe(true);
-    expect(jsFiles.some((f) => f.startsWith("force-"))).toBe(false);
+    expect(jsFiles.some((f) => /^app[.\-]/.test(f))).toBe(true);
+    expect(jsFiles.some((f) => /^force[.\-]/.test(f))).toBe(false);
 
     const appJs = await readFile(
-      join(tmpInlineOut, jsFiles.find((f) => f.startsWith("app-"))!),
+      join(tmpInlineOut, jsFiles.find((f) => /^app[.\-]/.test(f))!),
       "utf8",
     );
     expect(appJs).toContain("forced");
@@ -274,13 +274,13 @@ describe("buildProject — auto-inline", () => {
     const jsFiles = await Array.fromAsync(
       new Bun.Glob("**/*.js").scan(tmpInlineOut),
     );
-    expect(jsFiles.some((f) => f.startsWith("a-"))).toBe(true);
-    expect(jsFiles.some((f) => f.startsWith("b-"))).toBe(false);
-    expect(jsFiles.some((f) => f.startsWith("c-"))).toBe(false);
+    expect(jsFiles.some((f) => /^a[.\-]/.test(f))).toBe(true);
+    expect(jsFiles.some((f) => /^b[.\-]/.test(f))).toBe(false);
+    expect(jsFiles.some((f) => /^c[.\-]/.test(f))).toBe(false);
 
     // All code should be bundled into a's output
     const aJs = await readFile(
-      join(tmpInlineOut, jsFiles.find((f) => f.startsWith("a-"))!),
+      join(tmpInlineOut, jsFiles.find((f) => /^a[.\-]/.test(f))!),
       "utf8",
     );
     expect(aJs).toContain("100");
@@ -307,7 +307,7 @@ describe("buildProject — auto-inline", () => {
     const jsFiles = await Array.fromAsync(
       new Bun.Glob("**/*.js").scan(tmpInlineOut),
     );
-    expect(jsFiles.some((f) => f.startsWith("app-"))).toBe(true);
-    expect(jsFiles.some((f) => f.includes("util-"))).toBe(false);
+    expect(jsFiles.some((f) => /^app[.\-]/.test(f))).toBe(true);
+    expect(jsFiles.some((f) => /util[.\-]/.test(f))).toBe(false);
   });
 });
