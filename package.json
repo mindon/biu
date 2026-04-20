@@ -1,6 +1,6 @@
 {
   "name": "biu",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Zero-config bun build tool with minify and module splitting",
   "main": "index.ts",
   "dependencies": {
@@ -9,6 +9,6 @@
     "html-minifier-terser": "^7.2.0",
     "magic-string": "^0.30.21",
     "sass": "^1.99.0",
-    "typescript": "^6.0.2"
+    "typescript": "^6.0.3"
   }
 }

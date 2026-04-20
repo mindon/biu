@@ -217,13 +217,48 @@ describe("buildProject — auto-inline", () => {
     expect(jsFiles.some((f) => /^shared[.\-]/.test(f))).toBe(true);
   });
 
-  test("?? suffix forces inline even if basename is in HTML", async () => {
-    // force.ts basename appears in HTML, but imported with ?? → still inlined
+  test("?? suffix forces inline into importer, but keeps independent module if HTML references it", async () => {
+    // force.ts is directly referenced in HTML <script src> → independent module output
+    // AND imported with ?? in app.ts → code also inlined into app.js
     await writeFile(
       join(tmpInlineSrc, "index.html"),
       `<html><body>
         <script type="module" src="app.ts"></script>
-        <!-- force.ts mentioned here -->
+        <script type="module" src="force.ts"></script>
+      </body></html>`,
+    );
+    await writeFile(
+      join(tmpInlineSrc, "app.ts"),
+      `import { x } from "./force.ts??";\nconsole.log(x);`,
+    );
+    await writeFile(
+      join(tmpInlineSrc, "force.ts"),
+      `export const x = "forced";`,
+    );
+
+    await buildProject(tmpInlineSrc, tmpInlineOut);
+
+    const jsFiles = await Array.fromAsync(
+      new Bun.Glob("**/*.js").scan(tmpInlineOut),
+    );
+    // force.ts is in HTML <script src> → still has independent output
+    expect(jsFiles.some((f) => /^app[.\-]/.test(f))).toBe(true);
+    expect(jsFiles.some((f) => /^force[.\-]/.test(f))).toBe(true);
+
+    // But app.js should also contain the inlined code from force.ts
+    const appJs = await readFile(
+      join(tmpInlineOut, jsFiles.find((f) => /^app[.\-]/.test(f))!),
+      "utf8",
+    );
+    expect(appJs).toContain("forced");
+  });
+
+  test("?? suffix forces inline, no independent output if not in HTML", async () => {
+    // force.ts is NOT referenced in HTML, only via ?? → inlined, no separate file
+    await writeFile(
+      join(tmpInlineSrc, "index.html"),
+      `<html><body>
+        <script type="module" src="app.ts"></script>
       </body></html>`,
     );
     await writeFile(

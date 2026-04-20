@@ -49,7 +49,9 @@ async function resolveDependencies(
       );
       if (jsFiles.includes(depPath)) {
         if (/\?\?/.test(fullPath)) {
-          // ?? suffix → force inline
+          // ?? suffix → force inline 到 importer 中
+          // 仅将其加入 deps（使 importer bundle 时包含它）
+          // 不从 modules 中移除：如果 HTML 直接引用了它，它仍保留独立模块输出
           deps.add(depPath);
         } else if (htmlRawContents.includes(basename(depPath))) {
           // basename 出现在某个 HTML 中 → 独立模块
@@ -63,6 +65,7 @@ async function resolveDependencies(
       }
     }
   }
+
   return {
     entrypoints: Array.from(deps),
     moduleEntries: Array.from(modules),
@@ -138,32 +141,34 @@ async function updateJsImports(
         let changed = false;
 
         // (a) 替换 import/from 中的 module 引用路径
+        //     force-inline 后，内联代码中的 import 相对路径可能不再正确，
+        //     需要基于产物输出位置重新计算完整相对路径
+        const jsOutDir = dirname(output.path);
         for (const [srcFile, outputFile] of sourceToOutput) {
           if (!moduleAbsPaths.has(srcFile)) continue;
 
           const srcBaseName = basename(srcFile).replace(/\.(ts|js)$/, "");
-          const outputFileName = basename(outputFile);
+          // 从当前 JS 产物到目标模块产物的正确相对路径
+          let correctRelPath = relative(jsOutDir, outputFile);
+          if (!correctRelPath.startsWith(".")) {
+            correctRelPath = `./${correctRelPath}`;
+          }
+          const extra = extras?.[srcFile] ?? "";
 
-          const patterns = [
-            new RegExp(
-              `((?:import|from)\\s*["']\\.\\/)(${srcBaseName})(\\.(?:js|ts))(["'])`,
-              "g",
-            ),
-            new RegExp(
-              `((?:import|from)\\s*["'][^"']*\\/)(${srcBaseName})(\\.(?:js|ts))(["'])`,
-              "g",
-            ),
-          ];
+          const pattern = new RegExp(
+            `((?:import|from)\\s*["'])([^"']*?\\/?)(${srcBaseName})(\\.(?:js|ts))([^"']*)(["'])`,
+            "g",
+          );
 
-          for (const pattern of patterns) {
-            const newCode = code.replace(
-              pattern,
-              `$1${outputFileName}${extras?.[srcFile] ?? ""}$4`,
-            );
-            if (newCode !== code) {
-              code = newCode;
-              changed = true;
-            }
+          const newCode = code.replace(
+            pattern,
+            (_match, prefix, _dir, _name, _ext, _suffix, quote) => {
+              return `${prefix}${correctRelPath}${extra}${quote}`;
+            },
+          );
+          if (newCode !== code) {
+            code = newCode;
+            changed = true;
           }
         }
 

@@ -43,25 +43,38 @@ export function createMainPlugin(moduleAbsPaths: Set<string>): Plugin {
 
         // 去掉查询参数来解析实际路径
         if (moduleAbsPaths.has(absPath)) {
-          // 计算相对路径，将 .ts 改为 .js
+          const isForceInline = /\?\?/.test(args.path);
+          if (isForceInline) {
+            // ?? → 不标记为 external，直接返回绝对路径让 bun bundle 它
+            return { path: absPath, external: false };
+          }
+          // 非 ?? → 标记为 external，用相对路径指向产物
           const extra = (args.path.match(/[#\?].*$/) || [""])[0];
           const rel = relative(dirname(args.importer), absPath).replace(
             /\.ts$/,
             `.js${extra}`,
           );
           const relPath = rel.startsWith(".") ? rel : `./${rel}`;
-          return { path: relPath, external: !/\?\?/.test(args.path) };
+          return { path: relPath, external: true };
         }
         return undefined;
       });
 
-      // onLoad：压缩模板字面量 + 去掉 ?# 后缀
+      // onLoad：压缩模板字面量 + 去掉 ?# 后缀（但保留 ?? 标记供 onResolve 识别）
       builder.onLoad({ filter: /\.(ts|js)$/ }, async (args) => {
         let code = await readFile(args.path, "utf8");
+        // 先保护 ?? 标记，替换为占位符
+        code = code.replace(
+          /(\b(?:import|from)\s+["'][^"']*?)\?\?([^"']*["'])/g,
+          "$1\x00FORCEINLINE\x00$2",
+        );
+        // 去掉普通的 ?# 后缀
         code = code.replace(
           /(\b(?:import|from)\s+["'][^"']*?)[#?][^"']*(["'])/g,
           "$1$2",
         );
+        // 恢复 ?? 标记
+        code = code.replace(/\x00FORCEINLINE\x00/g, "??");
         const result: any = await minifyHTMLLiterals(code);
         return { contents: result ? result.code : code, loader: "ts" };
       });

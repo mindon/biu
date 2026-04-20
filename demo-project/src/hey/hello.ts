@@ -1,3 +1,3 @@
-import "./inline.ts??";
-import { hello } from "./auto-inline-bundling.ts";
+import "./force-inline.ts??";
+import { hello } from "./auto-inline.ts";
 console.log(hello);
