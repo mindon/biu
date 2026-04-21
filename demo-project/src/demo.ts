@@ -5,11 +5,13 @@ import {
 
 const hello = "world";
 
+const some = `h1{colore:orange}`;
+
 export const world = css`
   a {
     color: red;
   }
-  b {
+  ${some} b {
     color: #00f;
   }
 `;
