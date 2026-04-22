@@ -5,6 +5,9 @@ import { readFile } from "node:fs/promises";
 import { dirname, relative, resolve } from "node:path";
 import { minifyHTMLLiterals } from "../plugins/minify-html-literals/minify-html-literals.ts";
 
+// 快速检测代码中是否存在 html` 或 css` 模板字面量标签
+const hasTemplateLiterals = (code: string) => /\b(?:html|css)`/s.test(code);
+
 /**
  * 基础插件：仅做 html/css 模板字面量压缩，用于构建独立 module 文件
  */
@@ -18,8 +21,11 @@ export const basePlugin: Plugin = {
         /((?:import|from)\s+["'][^"']*?)[#\?][^"']*(["'])/g,
         "$1$2",
       );
-      const result: any = await minifyHTMLLiterals(code);
-      return { contents: result ? result.code : code, loader: "ts" };
+      if (hasTemplateLiterals(code)) {
+        const result: any = await minifyHTMLLiterals(code);
+        if (result) code = result.code;
+      }
+      return { contents: code, loader: "ts" };
     });
   },
 };
@@ -33,8 +39,9 @@ export function createMainPlugin(moduleAbsPaths: Set<string>): Plugin {
   return {
     name: "main-plugin",
     setup(builder) {
-      // 优先级高：先拦截所有 .ts/.js 导入，检查是否属于 module
-      builder.onResolve({ filter: /\.(ts|js)([#\?].*)?$/ }, (args) => {
+      // 优先级高：先拦截 .ts 导入，检查是否属于 module
+      // 注意：不能匹配 .js，否则会干扰 node_modules 中 .js 模块的解析（Bun bug）
+      builder.onResolve({ filter: /\.ts([#\?].*)?$/ }, (args) => {
         if (!args.path.startsWith(".") && !args.path.startsWith("/")) {
           return undefined;
         }
@@ -75,8 +82,11 @@ export function createMainPlugin(moduleAbsPaths: Set<string>): Plugin {
         );
         // 恢复 ?? 标记
         code = code.replace(/\x00FORCEINLINE\x00/g, "??");
-        const result: any = await minifyHTMLLiterals(code);
-        return { contents: result ? result.code : code, loader: "ts" };
+        if (hasTemplateLiterals(code)) {
+          const result: any = await minifyHTMLLiterals(code);
+          if (result) code = result.code;
+        }
+        return { contents: code, loader: "ts" };
       });
     },
   };

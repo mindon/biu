@@ -5,7 +5,11 @@ import {
 
 const hello = "world";
 
-const some = `h1{colore:orange}`;
+const some = css`
+  h1 {
+    colore: orange;
+  }
+`;
 
 export const world = css`
   a {
