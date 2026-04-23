@@ -8,10 +8,10 @@ import type { DependsMode } from "./cli.ts";
 
 const CACHE_FILE = ".biu-deps";
 
-/** import/require 模式 */
+/** import/require 模式（仅在已剥离字符串和注释的代码上运行） */
 const IMPORT_PATTERNS: RegExp[] = [
-  // ESM: from "pkg"（覆盖 import {...} from / export {...} from / export * from）
-  /\bfrom\s*["']([^"']+)["']/g,
+  // ESM: import/export ... from "pkg"（必须前置 import/export 关键字）
+  /\b(?:import|export)\s+[\s\S]*?\bfrom\s*["']([^"']+)["']/g,
   // ESM side-effect: import "pkg"（仅 import 后直接跟字符串，无绑定）
   /\bimport\s*["']([^"']+)["']/g,
   // CJS: require("pkg") — 仅单参数形式（右括号紧跟引号后）
@@ -19,14 +19,244 @@ const IMPORT_PATTERNS: RegExp[] = [
 ];
 
 /**
- * 从代码中提取所有 import specifier（原始值）
- * 仅做语法层面的快速过滤（协议/相对路径/绝对路径/URL）
+ * npm 包名合法性校验（简化版）
+ * 合法包名规则：
+ *  - 不能为空，不能以 . 或 _ 开头
+ *  - 只含小写字母、数字、连字符、点号（scoped 包以 @ 开头含 /）
+ *  - 不能含空格或特殊字符
  */
-function extractImportSpecs(code: string): Set<string> {
+const VALID_PKG_NAME_RE = /^(@[a-z0-9._-]+\/)?[a-z0-9][a-z0-9._-]*$/;
+
+/** @internal — exported for testing */
+export function isValidPackageName(name: string): boolean {
+  return VALID_PKG_NAME_RE.test(name);
+}
+
+/**
+ * 剥离代码中的字符串字面量（单引号/双引号/模板字符串）和注释，
+ * 将其替换为空格（保留换行），避免正则误匹配字符串/注释中的内容。
+ *
+ * 对于 import/export/require 语句的 specifier 引号字符串则保留原文。
+ *
+ * 使用状态机逐字符扫描，正确处理：
+ *  - 行注释 // ...
+ *  - 块注释 /* ... * /
+ *  - 单/双引号字符串（含转义）
+ *  - 模板字符串（含 ${...} 嵌套，可跨行，可嵌套模板字符串）
+ */
+/** @internal — exported for testing */
+export function stripNonImportStringsAndComments(code: string): string {
+  const out: string[] = [];
+  const len = code.length;
+  let i = 0;
+
+  while (i < len) {
+    const ch = code[i];
+    const next = i + 1 < len ? code[i + 1] : "";
+
+    // ---- 行注释 ----
+    if (ch === "/" && next === "/") {
+      while (i < len && code[i] !== "\n") {
+        out.push(" ");
+        i++;
+      }
+      continue;
+    }
+
+    // ---- 块注释 ----
+    if (ch === "/" && next === "*") {
+      out.push(" ", " ");
+      i += 2;
+      while (i < len) {
+        if (code[i] === "*" && i + 1 < len && code[i + 1] === "/") {
+          out.push(" ", " ");
+          i += 2;
+          break;
+        }
+        out.push(code[i] === "\n" ? "\n" : " ");
+        i++;
+      }
+      continue;
+    }
+
+    // ---- 模板字符串（反引号） ----
+    if (ch === "`") {
+      consumeTemplateLiteral();
+      continue;
+    }
+
+    // ---- 单/双引号字符串 ----
+    if (ch === '"' || ch === "'") {
+      consumeQuotedString(ch);
+      continue;
+    }
+
+    // ---- 普通字符，原样输出 ----
+    out.push(ch);
+    i++;
+  }
+
+  return out.join("");
+
+  /**
+   * 消费一个模板字符串（从开头的 ` 开始），
+   * 将所有非换行内容替换为空格，正确追踪 ${...} 嵌套。
+   */
+  function consumeTemplateLiteral(): void {
+    out.push(" "); // 开头的 `
+    i++;
+    while (i < len) {
+      const c = code[i];
+      if (c === "\\") {
+        // 转义：跳过下一个字符
+        out.push(" ", code[i + 1] === "\n" ? "\n" : " ");
+        i += 2;
+        continue;
+      }
+      if (c === "`") {
+        // 模板字符串结束
+        out.push(" ");
+        i++;
+        return;
+      }
+      if (c === "$" && i + 1 < len && code[i + 1] === "{") {
+        // ${...} 插值：剥离 ${ ，然后递归扫描插值内的普通代码
+        out.push(" ", " ");
+        i += 2;
+        consumeInterpolation();
+        continue;
+      }
+      // 普通字符
+      out.push(c === "\n" ? "\n" : " ");
+      i++;
+    }
+  }
+
+  /**
+   * 消费 ${...} 插值内部——这是普通的 JS 代码，需要追踪花括号嵌套，
+   * 并递归处理内部的字符串/注释/模板字符串。
+   * 插值内的代码原样输出（不剥离），因为其中可能有真正的 import()。
+   */
+  function consumeInterpolation(): void {
+    let depth = 1;
+    while (i < len && depth > 0) {
+      const c = code[i];
+      const nx = i + 1 < len ? code[i + 1] : "";
+
+      // 行注释
+      if (c === "/" && nx === "/") {
+        while (i < len && code[i] !== "\n") {
+          out.push(" ");
+          i++;
+        }
+        continue;
+      }
+      // 块注释
+      if (c === "/" && nx === "*") {
+        out.push(" ", " ");
+        i += 2;
+        while (i < len) {
+          if (code[i] === "*" && i + 1 < len && code[i + 1] === "/") {
+            out.push(" ", " ");
+            i += 2;
+            break;
+          }
+          out.push(code[i] === "\n" ? "\n" : " ");
+          i++;
+        }
+        continue;
+      }
+
+      // 嵌套模板字符串
+      if (c === "`") {
+        consumeTemplateLiteral();
+        continue;
+      }
+      // 单/双引号字符串
+      if (c === '"' || c === "'") {
+        // 插值内的字符串也需要剥离
+        consumeQuotedStringBlank(c);
+        continue;
+      }
+      // 花括号嵌套追踪
+      if (c === "{") depth++;
+      if (c === "}") {
+        depth--;
+        if (depth === 0) {
+          out.push(" "); // 闭合的 }
+          i++;
+          return;
+        }
+      }
+      out.push(c);
+      i++;
+    }
+  }
+
+  /**
+   * 消费单/双引号字符串——根据所在行上下文决定保留还是剥离。
+   * 如果该字符串位于 import/export/require 语句中，保留原文；否则替换为空格。
+   */
+  function consumeQuotedString(quote: string): void {
+    // 判断是否在 import/export/require 语句中
+    const lineStart = code.lastIndexOf("\n", i - 1) + 1;
+    const linePrefix = code.slice(lineStart, i).trimStart();
+    const keep = /^(?:import|export)\b/.test(linePrefix) ||
+      /\bfrom\s*$/.test(linePrefix) ||
+      /\brequire\s*\(\s*$/.test(linePrefix);
+
+    if (keep) {
+      // 保留原文
+      out.push(code[i]); // 开头引号
+      i++;
+      while (i < len) {
+        const c = code[i];
+        if (c === "\\") {
+          out.push(code[i], code[i + 1] ?? "");
+          i += 2;
+          continue;
+        }
+        out.push(c);
+        i++;
+        if (c === quote) return;
+      }
+    } else {
+      consumeQuotedStringBlank(quote);
+    }
+  }
+
+  /** 消费单/双引号字符串，内容替换为空格 */
+  function consumeQuotedStringBlank(quote: string): void {
+    out.push(" "); // 开头引号
+    i++;
+    while (i < len) {
+      const c = code[i];
+      if (c === "\\") {
+        out.push(" ", " ");
+        i += 2;
+        continue;
+      }
+      if (c === quote) {
+        out.push(" ");
+        i++;
+        return;
+      }
+      out.push(c === "\n" ? "\n" : " ");
+      i++;
+    }
+  }
+}
+
+/**
+ * 从代码中提取所有 import specifier（原始值）
+ * 先剥离字符串和注释，再用正则匹配，避免误匹配
+ */
+/** @internal — exported for testing */
+export function extractImportSpecs(code: string): Set<string> {
+  const cleaned = stripNonImportStringsAndComments(code);
   const specs = new Set<string>();
   for (const pattern of IMPORT_PATTERNS) {
-    // 每次使用需要重置 lastIndex（或重新创建），这里用 matchAll 更安全
-    for (const m of code.matchAll(pattern)) {
+    for (const m of cleaned.matchAll(pattern)) {
       const spec = m[1];
       // 相对路径
       if (spec.startsWith("./") || spec.startsWith("../")) continue;
@@ -42,10 +272,12 @@ function extractImportSpecs(code: string): Set<string> {
   return specs;
 }
 
-/** 从 specifier 提取 npm 包名（@scope/pkg 或 pkg） */
-function specToPackageName(spec: string): string {
+/** 从 specifier 提取 npm 包名（@scope/pkg 或 pkg），无效则返回空串 */
+/** @internal — exported for testing */
+export function specToPackageName(spec: string): string {
   const parts = spec.split("/");
-  return parts[0].startsWith("@") ? `${parts[0]}/${parts[1]}` : parts[0];
+  const name = parts[0].startsWith("@") ? `${parts[0]}/${parts[1]}` : parts[0];
+  return isValidPackageName(name) ? name : "";
 }
 
 /**
