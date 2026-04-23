@@ -27,6 +27,7 @@ async function run() {
     version,
     usage,
     postBuildScript,
+    depends,
   } = parseArgs();
 
   if (version) {
@@ -81,7 +82,7 @@ async function run() {
       await copyStaticDir(staticDir, outDir, cwd);
     }
     if (staticMode === "static") return;
-    await buildProject(srcDir, outDir);
+    await buildProject(srcDir, outDir, depends);
     await postBuild(outDir, postBuildScript);
   }
 

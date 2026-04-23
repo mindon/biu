@@ -13,6 +13,12 @@ Options:
   --static <dir>       Static directory (default: ./static)
   --post-build <file>  Run .sh/.ts/.js script after build (receives outDir as $1)
   --serve [port]       Serve static files (default port: 3000)
+  --depends [mode]     Dependency handling (default: auto)
+                         auto            Auto-detect and install missing deps
+                         confirm         List deps and prompt y/n before install
+                         json            Record to package.json (no install)
+                         <file>.json     Record to <file>.json in package.json format
+                         <file>.txt      Record to <file>.txt as package,version lines
   --build [outfile]    Self-compile to binary (default: ./biu)
   -v, --version        Show version
   -h, --help           Show help

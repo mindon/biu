@@ -3,6 +3,19 @@
 import { resolve } from "node:path";
 import { USAGE, VERSION } from "./constants.ts";
 
+/**
+ * --depends 模式：
+ *  - "auto"          : 自动检测并安装缺失依赖（缺省值）
+ *  - "package.json"  : 记录到 package.json（不安装），等价于 --depends=json
+ *  - "<file>.json"   : 记录到指定 json 文件（package.json 格式，不安装）
+ *  - "<file>.txt"    : 记录到指定 txt 文件（每行 package,version 格式，不安装）
+ */
+export type DependsMode =
+  | { kind: "auto" }
+  | { kind: "confirm" }
+  | { kind: "json"; file: string }
+  | { kind: "txt"; file: string };
+
 export interface CliArgs {
   srcDir: string;
   outDir: string;
@@ -10,6 +23,7 @@ export interface CliArgs {
   staticDir: string | null;
   servePort: number | null;
   postBuildScript?: string;
+  depends: DependsMode;
   biu?: string;
   version?: string;
   usage?: string;
@@ -32,10 +46,22 @@ export function parseArgs(): CliArgs {
   let staticDir: string | null = "./static"; // 缺省值
   let servePort: number | null = null;
   let postBuildScript: string | undefined;
+  let depends: DependsMode = { kind: "auto" };
 
   const positional: string[] = [];
   for (let i = 0; i < args.length; i++) {
-    switch (args[i]) {
+    const arg = args[i];
+
+    // 处理 --depends / --depends=value / --depends value
+    if (arg === "--depends" || arg.startsWith("--depends=")) {
+      const val = arg.includes("=")
+        ? arg.slice(arg.indexOf("=") + 1)
+        : args[++i] ?? "auto";
+      depends = parseDependsValue(val);
+      continue;
+    }
+
+    switch (arg) {
       case "--watch":
         isWatch = true;
         break;
@@ -60,7 +86,7 @@ export function parseArgs(): CliArgs {
         } as CliArgs;
       }
       default:
-        if (!args[i].startsWith("-")) positional.push(args[i]);
+        if (!arg.startsWith("-")) positional.push(arg);
         break;
     }
   }
@@ -75,5 +101,18 @@ export function parseArgs(): CliArgs {
     staticDir: staticDir ? resolve(staticDir) : null,
     servePort,
     postBuildScript,
+    depends,
   };
+}
+
+/** 解析 --depends 的值 */
+function parseDependsValue(val: string): DependsMode {
+  if (!val || val === "auto") return { kind: "auto" };
+  if (val === "confirm") return { kind: "confirm" };
+  // --depends=json 等价于 --depends=package.json
+  if (val === "json") return { kind: "json", file: "package.json" };
+  if (val.endsWith(".json")) return { kind: "json", file: val };
+  if (val.endsWith(".txt")) return { kind: "txt", file: val };
+  // 其他未识别的值当做 auto
+  return { kind: "auto" };
 }

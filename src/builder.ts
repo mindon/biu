@@ -6,6 +6,8 @@ import { basename, dirname, extname, join, relative, resolve } from "node:path";
 
 import { ASSET_EXTS, MANAGED_EXTS } from "./constants.ts";
 import { scan } from "./utils.ts";
+import { autoInstallDeps } from "./deps.ts";
+import type { DependsMode } from "./cli.ts";
 import { processStyleFiles } from "./styles.ts";
 import { processAssetFiles } from "./assets.ts";
 import { basePlugin, createMainPlugin } from "./plugins.ts";
@@ -337,7 +339,11 @@ async function processHtmlFiles(
 /**
  * 主构建流程
  */
-export async function buildProject(srcDir: string, outDir: string) {
+export async function buildProject(
+  srcDir: string,
+  outDir: string,
+  depends?: DependsMode,
+) {
   const allFiles = (await scan(srcDir)).filter((f) =>
     !f.includes("node_modules") && !f.includes("dist")
   );
@@ -351,6 +357,9 @@ export async function buildProject(srcDir: string, outDir: string) {
     const ext = extname(f).toLowerCase();
     return !MANAGED_EXTS.has(ext) && ASSET_EXTS.has(ext);
   });
+
+  // 自动检测并安装缺失的 npm 依赖
+  await autoInstallDeps(jsFiles, srcDir, depends);
 
   // 从 HTML 入口开始分析依赖
   let initialEntries: string[] = [];
