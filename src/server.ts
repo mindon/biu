@@ -75,7 +75,7 @@ export function startDevServer(outDir: string, port: number, cwd: string) {
       const url = new URL(req.url);
       let pathname = decodeURIComponent(url.pathname);
       // 默认 / → /index.html
-      if (pathname === "/") pathname = "/index.html";
+      if (pathname.endsWith("/")) pathname = `${pathname}/index.html`;
 
       const filePath = join(outDir, pathname);
       const file = Bun.file(filePath);
