@@ -50,12 +50,15 @@ async function resolveDependencies(
         fullPath.replace(/[#\?].*$/, ""),
       );
       if (jsFiles.includes(depPath)) {
+        const tester = new RegExp(
+          `[/'"\`]${basename(depPath).replace(/\./g, "\\.")}[?#'"\`]`,
+        );
         if (/\?\?/.test(fullPath)) {
           // ?? suffix → force inline 到 importer 中
           // 仅将其加入 deps（使 importer bundle 时包含它）
           // 不从 modules 中移除：如果 HTML 直接引用了它，它仍保留独立模块输出
           deps.add(depPath);
-        } else if (htmlRawContents.includes(basename(depPath))) {
+        } else if (tester.test(htmlRawContents)) {
           // basename 出现在某个 HTML 中 → 独立模块
           modules.add(depPath);
           if (match[3]) extras[depPath] = match[3];
