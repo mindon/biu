@@ -35,6 +35,7 @@ export function startWatcher(
     debounceTimer = setTimeout(async () => {
       if (building) return;
       building = true;
+      const now = new Date().toLocaleTimeString();
       try {
         console.log(
           filename
@@ -42,8 +43,13 @@ export function startWatcher(
             : "\n✨ Rebuilding...",
         );
         await fullBuild(staticMode);
+        console.log(
+          filename
+            ? `\n✨ ${filename} changed at ${now}`
+            : `\n✨ rebuilded at ${now}`,
+        );
       } catch (err) {
-        console.error("❌ Build error:", err);
+        console.error("❌ Build error:", err, now);
       } finally {
         building = false;
       }
