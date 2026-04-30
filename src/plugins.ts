@@ -1,7 +1,6 @@
 // biu — Bun build plugins
 
 import type { Plugin } from "bun";
-import { readFile } from "node:fs/promises";
 import { dirname, relative, resolve } from "node:path";
 import { minifyHTMLLiterals } from "../plugins/minify-html-literals/minify-html-literals.ts";
 
@@ -15,7 +14,7 @@ export const basePlugin: Plugin = {
   name: "base-plugin",
   setup(builder) {
     builder.onLoad({ filter: /\.(ts|js)$/ }, async (args) => {
-      let code = await readFile(args.path, "utf8");
+      let code = await Bun.file(args.path).text();
       // 去掉代码中的 ?# 后缀，让 Bun 能正确解析路径
       code = code.replace(
         /((?:import|from)\s+["'][^"']*?)[#\?][^"']*(["'])/g,
@@ -69,7 +68,7 @@ export function createMainPlugin(moduleAbsPaths: Set<string>): Plugin {
 
       // onLoad：压缩模板字面量 + 去掉 ?# 后缀（但保留 ?? 标记供 onResolve 识别）
       builder.onLoad({ filter: /\.(ts|js)$/ }, async (args) => {
-        let code = await readFile(args.path, "utf8");
+        let code = await Bun.file(args.path).text();
         // 先保护 ?? 标记，替换为占位符
         code = code.replace(
           /(\b(?:import|from)\s+["'][^"']*?)\?\?([^"']*["'])/g,

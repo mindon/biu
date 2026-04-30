@@ -24,6 +24,7 @@ export interface CliArgs {
   servePort: number | null;
   postBuildScript?: string;
   depends: DependsMode;
+  forceWrite: boolean;
   biu?: string;
   version?: string;
   usage?: string;
@@ -47,6 +48,7 @@ export function parseArgs(): CliArgs {
   let servePort: number | null = null;
   let postBuildScript: string | undefined;
   let depends: DependsMode = { kind: "auto" };
+  let forceWrite = false;
 
   const positional: string[] = [];
   for (let i = 0; i < args.length; i++) {
@@ -64,6 +66,9 @@ export function parseArgs(): CliArgs {
     switch (arg) {
       case "--watch":
         isWatch = true;
+        break;
+      case "--force":
+        forceWrite = true;
         break;
       case "--static":
         staticDir = args[++i] ?? "./static";
@@ -102,6 +107,7 @@ export function parseArgs(): CliArgs {
     servePort,
     postBuildScript,
     depends,
+    forceWrite,
   };
 }
 

@@ -3,7 +3,7 @@
 // 从 package.json 自动提取版本号（bun build --compile 时会被静态内联）
 import pkg from "../package.json";
 
-export const VERSION = `biu v${pkg.version} — https://github.com/mindon/biu`;
+export const VERSION = `🪴 biu v${pkg.version} — https://github.com/mindon/biu`;
 
 export const USAGE = `
 Usage: biu [options] [srcDir] [outDir]
@@ -20,6 +20,7 @@ Options:
                          <file>.json     Record to <file>.json in package.json format
                          <file>.txt      Record to <file>.txt as package,version lines
   --build [outfile]    Self-compile to binary (default: ./biu)
+  --force              Force rewrite output files even if they already exist
   -v, --version        Show version
   -h, --help           Show help
 `;

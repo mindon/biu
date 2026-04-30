@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, rm } from "node:fs/promises";
 import { cleanCss, compileStyle, processStyleFiles } from "./styles.ts";
 
 const tmpDir = join(import.meta.dir, "__test_styles_tmp__");
@@ -16,7 +16,7 @@ describe("compileStyle", () => {
   test("minifies plain CSS file", async () => {
     await mkdir(tmpDir, { recursive: true });
     const cssFile = join(tmpDir, "test.css");
-    await writeFile(cssFile, "h1 {\n  color: red;\n  font-size: 16px;\n}\n");
+    await Bun.write(cssFile, "h1 {\n  color: red;\n  font-size: 16px;\n}\n");
 
     try {
       const result = await compileStyle(cssFile);
@@ -29,7 +29,7 @@ describe("compileStyle", () => {
   test("compiles and minifies SCSS file", async () => {
     await mkdir(tmpDir, { recursive: true });
     const scssFile = join(tmpDir, "test.scss");
-    await writeFile(
+    await Bun.write(
       scssFile,
       "$color: #333;\nbody {\n  color: $color;\n}\n",
     );
@@ -45,7 +45,7 @@ describe("compileStyle", () => {
   test("handles SCSS nesting", async () => {
     await mkdir(tmpDir, { recursive: true });
     const scssFile = join(tmpDir, "nested.scss");
-    await writeFile(
+    await Bun.write(
       scssFile,
       ".parent {\n  .child {\n    color: blue;\n  }\n}\n",
     );
@@ -67,18 +67,19 @@ describe("processStyleFiles", () => {
   test("processes CSS files with content hash in filename", async () => {
     await mkdir(srcDir, { recursive: true });
     const cssFile = join(srcDir, "main.css");
-    await writeFile(cssFile, "body { margin: 0; }");
+    await Bun.write(cssFile, "body { margin: 0; }");
 
     try {
-      const map = await processStyleFiles([cssFile], srcDir, outDir);
+      const { map, wrote } = await processStyleFiles([cssFile], srcDir, outDir);
 
       expect(map.size).toBe(1);
       expect(map.has(cssFile)).toBe(true);
+      expect(wrote).toBe(1);
 
       const outputPath = map.get(cssFile)!;
       expect(outputPath).toMatch(/main-[0-9a-f]{8}\.css$/);
 
-      const content = await readFile(outputPath, "utf8");
+      const content = await Bun.file(outputPath).text();
       expect(content).toBe("body{margin:0}");
     } finally {
       await rm(tmpDir, { recursive: true, force: true });
@@ -88,19 +89,24 @@ describe("processStyleFiles", () => {
   test("processes SCSS files with .css output extension", async () => {
     await mkdir(srcDir, { recursive: true });
     const scssFile = join(srcDir, "theme.scss");
-    await writeFile(
+    await Bun.write(
       scssFile,
       "$bg: #fff;\nbody { background: $bg; }\n",
     );
 
     try {
-      const map = await processStyleFiles([scssFile], srcDir, outDir);
+      const { map, wrote } = await processStyleFiles(
+        [scssFile],
+        srcDir,
+        outDir,
+      );
 
       expect(map.size).toBe(1);
+      expect(wrote).toBe(1);
       const outputPath = map.get(scssFile)!;
       expect(outputPath).toMatch(/theme-[0-9a-f]{8}\.css$/);
 
-      const content = await readFile(outputPath, "utf8");
+      const content = await Bun.file(outputPath).text();
       expect(content).toBe("body{background:#fff}");
     } finally {
       await rm(tmpDir, { recursive: true, force: true });
@@ -111,10 +117,10 @@ describe("processStyleFiles", () => {
     const subDir = join(srcDir, "components");
     await mkdir(subDir, { recursive: true });
     const cssFile = join(subDir, "btn.css");
-    await writeFile(cssFile, ".btn { display: inline-block; }");
+    await Bun.write(cssFile, ".btn { display: inline-block; }");
 
     try {
-      const map = await processStyleFiles([cssFile], srcDir, outDir);
+      const { map } = await processStyleFiles([cssFile], srcDir, outDir);
       const outputPath = map.get(cssFile)!;
       expect(outputPath).toContain(join(outDir, "components"));
     } finally {
@@ -123,7 +129,8 @@ describe("processStyleFiles", () => {
   });
 
   test("returns empty map for no input", async () => {
-    const map = await processStyleFiles([], srcDir, outDir);
+    const { map, wrote } = await processStyleFiles([], srcDir, outDir);
     expect(map.size).toBe(0);
+    expect(wrote).toBe(0);
   });
 });

@@ -3,7 +3,8 @@
 import CleanCSS from "clean-css";
 import { build } from "bun";
 import * as sass from "sass";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { mkdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, extname, join, relative } from "node:path";
 import { contentHash } from "./utils.ts";
@@ -73,7 +74,7 @@ async function minifyCssViaBun(
       contentHash(masked + sourceHint + process.pid + Date.now(), 16)
     }.css`,
   );
-  await writeFile(tmpFile, masked);
+  await Bun.write(tmpFile, masked);
 
   try {
     const result = await build({
@@ -106,7 +107,7 @@ export async function compileStyle(filePath: string): Promise<string> {
   const ext = extname(filePath).toLowerCase();
   const css = ext === ".scss" || ext === ".sass"
     ? sass.compile(filePath).css
-    : await readFile(filePath, "utf8");
+    : await Bun.file(filePath).text();
   return await minifyCssViaBun(css, filePath);
 }
 
@@ -118,8 +119,10 @@ export async function processStyleFiles(
   styleFiles: string[],
   srcDir: string,
   outDir: string,
-): Promise<Map<string, string>> {
+  forceWrite = false,
+): Promise<{ map: Map<string, string>; wrote: number }> {
   const sourceToOutputCss = new Map<string, string>();
+  let wrote = 0;
   const results = await Promise.all(
     styleFiles.map(async (file) => {
       const css = await compileStyle(file);
@@ -130,12 +133,17 @@ export async function processStyleFiles(
       const outputDir = join(outDir, relDir);
       await mkdir(outputDir, { recursive: true });
       const outputPath = join(outputDir, outputName);
-      await writeFile(outputPath, css);
-      return [file, outputPath] as const;
+      let written = false;
+      if (forceWrite || !existsSync(outputPath)) {
+        await Bun.write(outputPath, css);
+        written = true;
+      }
+      return [file, outputPath, written] as const;
     }),
   );
-  for (const [src, out] of results) {
+  for (const [src, out, written] of results) {
     sourceToOutputCss.set(src, out);
+    if (written) wrote++;
   }
-  return sourceToOutputCss;
+  return { map: sourceToOutputCss, wrote };
 }

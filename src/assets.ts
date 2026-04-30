@@ -1,7 +1,7 @@
 // biu — static asset processing
 
 import { existsSync } from "node:fs";
-import { cp, mkdir, readFile, writeFile } from "node:fs/promises";
+import { cp, mkdir } from "node:fs/promises";
 import { basename, dirname, extname, join, relative } from "node:path";
 import { contentHash } from "./utils.ts";
 
@@ -13,11 +13,13 @@ export async function processAssetFiles(
   assetFiles: string[],
   srcDir: string,
   outDir: string,
-): Promise<Map<string, string>> {
+  forceWrite = false,
+): Promise<{ map: Map<string, string>; wrote: number }> {
   const sourceToOutputAsset = new Map<string, string>();
+  let wrote = 0;
   const results = await Promise.all(
     assetFiles.map(async (file) => {
-      const buf = await readFile(file);
+      const buf = Buffer.from(await Bun.file(file).arrayBuffer());
       const hash = contentHash(buf);
       const ext = extname(file);
       const name = basename(file, ext);
@@ -28,16 +30,19 @@ export async function processAssetFiles(
       const outputDir = join(outDir, relDir);
       await mkdir(outputDir, { recursive: true });
       const outputPath = join(outputDir, outputName);
-      if (!existsSync(outputPath)) {
-        await writeFile(outputPath, buf);
+      let written = false;
+      if (forceWrite || !existsSync(outputPath)) {
+        await Bun.write(outputPath, buf);
+        written = true;
       }
-      return [file, outputPath] as const;
+      return [file, outputPath, written] as const;
     }),
   );
-  for (const [src, out] of results) {
+  for (const [src, out, written] of results) {
     sourceToOutputAsset.set(src, out);
+    if (written) wrote++;
   }
-  return sourceToOutputAsset;
+  return { map: sourceToOutputAsset, wrote };
 }
 
 /** 将 staticDir 下的所有内容复制到 outDir */

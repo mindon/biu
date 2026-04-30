@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, rm } from "node:fs/promises";
 import { contentHash, scan } from "./utils.ts";
 
 describe("contentHash", () => {
@@ -49,10 +49,10 @@ describe("scan", () => {
   test("recursively lists all files", async () => {
     // Setup temp directory
     await mkdir(join(testDir, "sub", "deep"), { recursive: true });
-    await writeFile(join(testDir, "a.txt"), "a");
-    await writeFile(join(testDir, "b.ts"), "b");
-    await writeFile(join(testDir, "sub", "c.js"), "c");
-    await writeFile(join(testDir, "sub", "deep", "d.html"), "d");
+    await Bun.write(join(testDir, "a.txt"), "a");
+    await Bun.write(join(testDir, "b.ts"), "b");
+    await Bun.write(join(testDir, "sub", "c.js"), "c");
+    await Bun.write(join(testDir, "sub", "deep", "d.html"), "d");
 
     try {
       const files = await scan(testDir);

@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
 import { existsSync } from "node:fs";
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, rm } from "node:fs/promises";
 import { copyStaticDir, processAssetFiles } from "./assets.ts";
 
 const tmpDir = join(import.meta.dir, "__test_assets_tmp__");
@@ -13,13 +13,14 @@ describe("processAssetFiles", () => {
   test("copies asset with content hash in filename", async () => {
     await mkdir(join(srcDir, "img"), { recursive: true });
     const pngFile = join(srcDir, "img", "logo.png");
-    await writeFile(pngFile, "fake-png-content");
+    await Bun.write(pngFile, "fake-png-content");
 
     try {
-      const map = await processAssetFiles([pngFile], srcDir, outDir);
+      const { map, wrote } = await processAssetFiles([pngFile], srcDir, outDir);
 
       expect(map.size).toBe(1);
       expect(map.has(pngFile)).toBe(true);
+      expect(wrote).toBe(1);
 
       const outputPath = map.get(pngFile)!;
       expect(outputPath).toMatch(/logo-[0-9a-f]{8}\.png$/);
@@ -32,10 +33,10 @@ describe("processAssetFiles", () => {
   test("favicon.ico keeps original name without hash", async () => {
     await mkdir(srcDir, { recursive: true });
     const faviconFile = join(srcDir, "favicon.ico");
-    await writeFile(faviconFile, "fake-ico-content");
+    await Bun.write(faviconFile, "fake-ico-content");
 
     try {
-      const map = await processAssetFiles([faviconFile], srcDir, outDir);
+      const { map } = await processAssetFiles([faviconFile], srcDir, outDir);
 
       const outputPath = map.get(faviconFile)!;
       expect(outputPath).toMatch(/favicon\.ico$/);
@@ -48,10 +49,10 @@ describe("processAssetFiles", () => {
   test("preserves subdirectory structure in output", async () => {
     await mkdir(join(srcDir, "assets", "fonts"), { recursive: true });
     const fontFile = join(srcDir, "assets", "fonts", "mono.woff2");
-    await writeFile(fontFile, "fake-font-data");
+    await Bun.write(fontFile, "fake-font-data");
 
     try {
-      const map = await processAssetFiles([fontFile], srcDir, outDir);
+      const { map } = await processAssetFiles([fontFile], srcDir, outDir);
       const outputPath = map.get(fontFile)!;
       expect(outputPath).toContain(join(outDir, "assets", "fonts"));
     } finally {
@@ -63,11 +64,11 @@ describe("processAssetFiles", () => {
     await mkdir(srcDir, { recursive: true });
     const fileA = join(srcDir, "a.txt");
     const fileB = join(srcDir, "b.txt");
-    await writeFile(fileA, "identical");
-    await writeFile(fileB, "identical");
+    await Bun.write(fileA, "identical");
+    await Bun.write(fileB, "identical");
 
     try {
-      const map = await processAssetFiles([fileA, fileB], srcDir, outDir);
+      const { map } = await processAssetFiles([fileA, fileB], srcDir, outDir);
       const hashA = map.get(fileA)!.match(/-([0-9a-f]{8})\./)?.[1];
       const hashB = map.get(fileB)!.match(/-([0-9a-f]{8})\./)?.[1];
       expect(hashA).toBe(hashB);
@@ -77,8 +78,9 @@ describe("processAssetFiles", () => {
   });
 
   test("returns empty map for no input", async () => {
-    const map = await processAssetFiles([], srcDir, outDir);
+    const { map, wrote } = await processAssetFiles([], srcDir, outDir);
     expect(map.size).toBe(0);
+    expect(wrote).toBe(0);
   });
 });
 
@@ -89,7 +91,7 @@ describe("copyStaticDir", () => {
 
   test("copies static directory contents to outDir", async () => {
     await mkdir(staticDir, { recursive: true });
-    await writeFile(join(staticDir, "robots.txt"), "User-agent: *");
+    await Bun.write(join(staticDir, "robots.txt"), "User-agent: *");
 
     try {
       await copyStaticDir(staticDir, outDir, cwd);

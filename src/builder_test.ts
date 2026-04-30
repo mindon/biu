@@ -1,7 +1,7 @@
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { join, resolve } from "node:path";
 import { existsSync } from "node:fs";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, rm } from "node:fs/promises";
 import { buildProject } from "./builder.ts";
 
 const demoSrc = resolve(import.meta.dir, "../demo-project/src");
@@ -51,7 +51,7 @@ describe("buildProject — integration", () => {
     try {
       await buildProject(demoSrc, tmpOut);
 
-      const indexHtml = await readFile(join(tmpOut, "index.html"), "utf8");
+      const indexHtml = await Bun.file(join(tmpOut, "index.html")).text();
       // Should reference hashed JS, not original .ts
       expect(indexHtml).not.toContain(".ts");
       expect(indexHtml).toMatch(/main[.\-][0-9a-z]+\.js/);
@@ -73,7 +73,7 @@ describe("buildProject — integration", () => {
         new Bun.Glob("styles[-.]*.css").scan(tmpOut),
       );
       expect(cssFiles.length).toBe(1);
-      const css = await readFile(join(tmpOut, cssFiles[0]), "utf8");
+      const css = await Bun.file(join(tmpOut, cssFiles[0])).text();
       // Should be minified (no extra whitespace)
       expect(css).not.toContain("  ");
       expect(css).toContain("font:");
@@ -90,7 +90,7 @@ describe("buildProject — integration", () => {
       const cssFiles = await Array.fromAsync(
         new Bun.Glob("styles[-.]*.css").scan(tmpOut),
       );
-      const css = await readFile(join(tmpOut, cssFiles[0]), "utf8");
+      const css = await Bun.file(join(tmpOut, cssFiles[0])).text();
       // url() should point to hashed asset, not original
       expect(css).not.toContain("mindon.png");
       expect(css).toMatch(/mindon[.\-][0-9a-f]+\.png/);
@@ -103,10 +103,9 @@ describe("buildProject — integration", () => {
     try {
       await buildProject(demoSrc, tmpOut);
 
-      const worldHtml = await readFile(
+      const worldHtml = await Bun.file(
         join(tmpOut, "hey", "world.html"),
-        "utf8",
-      );
+      ).text();
       // Should reference parent dir CSS/JS with correct relative paths
       expect(worldHtml).toMatch(/styles[.\-][0-9a-f]+\.css/);
       expect(worldHtml).toMatch(/hello[.\-][0-9a-z]+\.js/);
@@ -131,15 +130,15 @@ describe("buildProject — auto-inline", () => {
 
   test("basename not in HTML → auto inlined (no separate output)", async () => {
     // helper.ts is never mentioned in any HTML → should be inlined into app.ts
-    await writeFile(
+    await Bun.write(
       join(tmpInlineSrc, "index.html"),
       `<html><body><script type="module" src="app.ts"></script></body></html>`,
     );
-    await writeFile(
+    await Bun.write(
       join(tmpInlineSrc, "app.ts"),
       `import { greet } from "./helper.ts";\nconsole.log(greet());`,
     );
-    await writeFile(
+    await Bun.write(
       join(tmpInlineSrc, "helper.ts"),
       `export function greet() { return "hello"; }`,
     );
@@ -154,27 +153,26 @@ describe("buildProject — auto-inline", () => {
     expect(jsFiles.some((f) => /^helper[.\-]/.test(f))).toBe(false);
 
     // The inlined content should be inside app's output
-    const appJs = await readFile(
+    const appJs = await Bun.file(
       join(tmpInlineOut, jsFiles.find((f) => /^app[.\-]/.test(f))!),
-      "utf8",
-    );
+    ).text();
     expect(appJs).toContain("hello");
   });
 
   test("basename appears in HTML → separate module output", async () => {
     // lib.ts is referenced from HTML → should stay as separate module
-    await writeFile(
+    await Bun.write(
       join(tmpInlineSrc, "index.html"),
       `<html><body>
         <script type="module" src="app.ts"></script>
         <script type="module" src="lib.ts"></script>
       </body></html>`,
     );
-    await writeFile(
+    await Bun.write(
       join(tmpInlineSrc, "app.ts"),
       `import { util } from "./lib.ts";\nconsole.log(util());`,
     );
-    await writeFile(
+    await Bun.write(
       join(tmpInlineSrc, "lib.ts"),
       `export function util() { return "lib"; }`,
     );
@@ -190,7 +188,7 @@ describe("buildProject — auto-inline", () => {
 
   test("basename in inline script import → separate module", async () => {
     // shared.ts appears in HTML inline import → separate module
-    await writeFile(
+    await Bun.write(
       join(tmpInlineSrc, "index.html"),
       `<html><body>
         <script type="module" src="entry.ts"></script>
@@ -200,11 +198,11 @@ describe("buildProject — auto-inline", () => {
         </script>
       </body></html>`,
     );
-    await writeFile(
+    await Bun.write(
       join(tmpInlineSrc, "entry.ts"),
       `import { val } from "./shared.ts";\nconsole.log(val);`,
     );
-    await writeFile(
+    await Bun.write(
       join(tmpInlineSrc, "shared.ts"),
       `export const val = 42;`,
     );
@@ -220,18 +218,18 @@ describe("buildProject — auto-inline", () => {
   test("?? suffix forces inline into importer, but keeps independent module if HTML references it", async () => {
     // force.ts is directly referenced in HTML <script src> → independent module output
     // AND imported with ?? in app.ts → code also inlined into app.js
-    await writeFile(
+    await Bun.write(
       join(tmpInlineSrc, "index.html"),
       `<html><body>
         <script type="module" src="app.ts"></script>
         <script type="module" src="force.ts"></script>
       </body></html>`,
     );
-    await writeFile(
+    await Bun.write(
       join(tmpInlineSrc, "app.ts"),
       `import { x } from "./force.ts??";\nconsole.log(x);`,
     );
-    await writeFile(
+    await Bun.write(
       join(tmpInlineSrc, "force.ts"),
       `export const x = "forced";`,
     );
@@ -246,26 +244,25 @@ describe("buildProject — auto-inline", () => {
     expect(jsFiles.some((f) => /^force[.\-]/.test(f))).toBe(true);
 
     // But app.js should also contain the inlined code from force.ts
-    const appJs = await readFile(
+    const appJs = await Bun.file(
       join(tmpInlineOut, jsFiles.find((f) => /^app[.\-]/.test(f))!),
-      "utf8",
-    );
+    ).text();
     expect(appJs).toContain("forced");
   });
 
   test("?? suffix forces inline, no independent output if not in HTML", async () => {
     // force.ts is NOT referenced in HTML, only via ?? → inlined, no separate file
-    await writeFile(
+    await Bun.write(
       join(tmpInlineSrc, "index.html"),
       `<html><body>
         <script type="module" src="app.ts"></script>
       </body></html>`,
     );
-    await writeFile(
+    await Bun.write(
       join(tmpInlineSrc, "app.ts"),
       `import { x } from "./force.ts??";\nconsole.log(x);`,
     );
-    await writeFile(
+    await Bun.write(
       join(tmpInlineSrc, "force.ts"),
       `export const x = "forced";`,
     );
@@ -278,28 +275,27 @@ describe("buildProject — auto-inline", () => {
     expect(jsFiles.some((f) => /^app[.\-]/.test(f))).toBe(true);
     expect(jsFiles.some((f) => /^force[.\-]/.test(f))).toBe(false);
 
-    const appJs = await readFile(
+    const appJs = await Bun.file(
       join(tmpInlineOut, jsFiles.find((f) => /^app[.\-]/.test(f))!),
-      "utf8",
-    );
+    ).text();
     expect(appJs).toContain("forced");
   });
 
   test("deep dependency chain — transitive auto-inline", async () => {
     // a.ts → b.ts → c.ts, only a.ts in HTML; b.ts and c.ts should be inlined
-    await writeFile(
+    await Bun.write(
       join(tmpInlineSrc, "index.html"),
       `<html><body><script type="module" src="a.ts"></script></body></html>`,
     );
-    await writeFile(
+    await Bun.write(
       join(tmpInlineSrc, "a.ts"),
       `import { b } from "./b.ts";\nconsole.log(b);`,
     );
-    await writeFile(
+    await Bun.write(
       join(tmpInlineSrc, "b.ts"),
       `import { c } from "./c.ts";\nexport const b = c + 1;`,
     );
-    await writeFile(
+    await Bun.write(
       join(tmpInlineSrc, "c.ts"),
       `export const c = 100;`,
     );
@@ -314,25 +310,24 @@ describe("buildProject — auto-inline", () => {
     expect(jsFiles.some((f) => /^c[.\-]/.test(f))).toBe(false);
 
     // All code should be bundled into a's output
-    const aJs = await readFile(
+    const aJs = await Bun.file(
       join(tmpInlineOut, jsFiles.find((f) => /^a[.\-]/.test(f))!),
-      "utf8",
-    );
+    ).text();
     expect(aJs).toContain("100");
   });
 
   test("subdirectory helper is auto-inlined", async () => {
     // sub/util.ts only imported by app.ts, not in HTML → inlined
     await mkdir(join(tmpInlineSrc, "sub"), { recursive: true });
-    await writeFile(
+    await Bun.write(
       join(tmpInlineSrc, "index.html"),
       `<html><body><script type="module" src="app.ts"></script></body></html>`,
     );
-    await writeFile(
+    await Bun.write(
       join(tmpInlineSrc, "app.ts"),
       `import { add } from "./sub/util.ts";\nconsole.log(add(1, 2));`,
     );
-    await writeFile(
+    await Bun.write(
       join(tmpInlineSrc, "sub", "util.ts"),
       `export function add(a: number, b: number) { return a + b; }`,
     );

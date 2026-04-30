@@ -24,6 +24,7 @@ describe("parseArgs", () => {
       expect(result.staticDir).toBe(resolve("./static"));
       expect(result.servePort).toBeNull();
       expect(result.postBuildScript).toBeUndefined();
+      expect(result.forceWrite).toBe(false);
     });
   });
 
@@ -140,6 +141,23 @@ describe("parseArgs", () => {
       expect(result.isWatch).toBe(true);
       expect(result.staticDir).toBe(resolve("./assets"));
       expect(result.servePort).toBe(4000);
+    });
+  });
+
+  test("--force enables force write", () => {
+    withArgs(["--force"], () => {
+      const result = parseArgs();
+      expect(result.forceWrite).toBe(true);
+    });
+  });
+
+  test("--force combined with other options", () => {
+    withArgs(["--force", "--watch", "./app", "./build"], () => {
+      const result = parseArgs();
+      expect(result.forceWrite).toBe(true);
+      expect(result.isWatch).toBe(true);
+      expect(result.srcDir).toBe(resolve("./app"));
+      expect(result.outDir).toBe(resolve("./build"));
     });
   });
 });

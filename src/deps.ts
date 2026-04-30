@@ -1,8 +1,7 @@
 // biu — auto-detect and install missing npm dependencies
 
 import { existsSync } from "node:fs";
-import { readFile, stat, writeFile } from "node:fs/promises";
-import { createHash } from "node:crypto";
+import { stat } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import type { DependsMode } from "./cli.ts";
 
@@ -322,7 +321,7 @@ async function computeDepsHash(
   jsFiles: string[],
   pkgs: Set<string>,
 ): Promise<string> {
-  const h = createHash("sha256");
+  const h = new Bun.CryptoHasher("sha256");
   // 包名列表（排序保证稳定性）
   h.update([...pkgs].sort().join("\n"));
   h.update("\x00");
@@ -346,7 +345,7 @@ async function computeDepsHash(
  */
 async function readCacheHash(installDir: string): Promise<string | null> {
   try {
-    return (await readFile(join(installDir, CACHE_FILE), "utf8")).trim();
+    return (await Bun.file(join(installDir, CACHE_FILE)).text()).trim();
   } catch {
     return null;
   }
@@ -359,7 +358,7 @@ async function writeCacheHash(
   installDir: string,
   hash: string,
 ): Promise<void> {
-  await writeFile(join(installDir, CACHE_FILE), hash + "\n");
+  await Bun.write(join(installDir, CACHE_FILE), hash + "\n");
 }
 
 /**
@@ -382,7 +381,7 @@ export async function autoInstallDeps(
   const allPkgs = new Set<string>();
   await Promise.all(
     jsFiles.map(async (file) => {
-      const code = await readFile(file, "utf8");
+      const code = await Bun.file(file).text();
       const dir = dirname(file);
       for (const spec of extractImportSpecs(code)) {
         // 检查 spec 是否指向本地文件（相对于当前文件目录解析）
@@ -529,7 +528,7 @@ async function recordDepsToJson(
 ): Promise<void> {
   let pkg: Record<string, unknown> = {};
   try {
-    const raw = await readFile(outFile, "utf8");
+    const raw = await Bun.file(outFile).text();
     pkg = JSON.parse(raw);
   } catch {
     // 文件不存在或解析失败，从头创建
@@ -542,7 +541,7 @@ async function recordDepsToJson(
     }
   }
   pkg.dependencies = deps;
-  await writeFile(outFile, JSON.stringify(pkg, null, 2) + "\n");
+  await Bun.write(outFile, JSON.stringify(pkg, null, 2) + "\n");
 }
 
 /**
@@ -555,7 +554,7 @@ async function recordDepsToTxt(
 ): Promise<void> {
   const existing = new Map<string, string>();
   try {
-    const raw = await readFile(outFile, "utf8");
+    const raw = await Bun.file(outFile).text();
     for (const line of raw.split("\n")) {
       const trimmed = line.trim();
       if (!trimmed || trimmed.startsWith("#")) continue;
@@ -579,5 +578,5 @@ async function recordDepsToTxt(
   const lines = [...existing.entries()]
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([name, ver]) => `${name},${ver}`);
-  await writeFile(outFile, lines.join("\n") + "\n");
+  await Bun.write(outFile, lines.join("\n") + "\n");
 }

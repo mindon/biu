@@ -1,6 +1,6 @@
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { join } from "node:path";
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, rm } from "node:fs/promises";
 import { processHtml } from "./html.ts";
 
 const tmpDir = join(import.meta.dir, "__test_html_tmp__");
@@ -17,7 +17,7 @@ describe("processHtml", () => {
 
   test("minifies HTML (removes whitespace and comments)", async () => {
     const htmlFile = join(tmpDir, "basic.html");
-    await writeFile(
+    await Bun.write(
       htmlFile,
       `<html>
   <head>
@@ -40,7 +40,7 @@ describe("processHtml", () => {
 
   test("minifies inline <style> content", async () => {
     const htmlFile = join(tmpDir, "styled.html");
-    await writeFile(
+    await Bun.write(
       htmlFile,
       `<html>
 <head>
@@ -61,7 +61,7 @@ describe("processHtml", () => {
 
   test("handles multiple <style> blocks", async () => {
     const htmlFile = join(tmpDir, "multi-style.html");
-    await writeFile(
+    await Bun.write(
       htmlFile,
       `<html>
 <head>
@@ -79,7 +79,7 @@ describe("processHtml", () => {
 
   test("preserves script tags", async () => {
     const htmlFile = join(tmpDir, "script.html");
-    await writeFile(
+    await Bun.write(
       htmlFile,
       `<html>
 <body>
@@ -95,7 +95,7 @@ describe("processHtml", () => {
 
   test("handles empty HTML", async () => {
     const htmlFile = join(tmpDir, "empty.html");
-    await writeFile(htmlFile, "<html><body></body></html>");
+    await Bun.write(htmlFile, "<html><body></body></html>");
 
     const result = await processHtml(htmlFile);
     expect(result).toBe("<html><body></body></html>");

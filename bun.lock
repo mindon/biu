@@ -89,7 +89,7 @@
 
     "entities": ["entities@8.0.0", "", {}, "sha512-zwfzJecQ/Uej6tusMqwAqU/6KL2XaB2VZ2Jg54Je6ahNBGNH6Ek6g3jjNCF0fG9EWQKGZNddNjU5F1ZQn/sBnA=="],
 
-    "html-minifier-next": ["html-minifier-next@6.1.2", "", { "dependencies": { "commander": "^14.0.2", "entities": "^8.0.0", "lightningcss": "^1.32.0", "svgo": "^4.0.1", "terser": "^5.46.1" }, "peerDependencies": { "@swc/core": "^1.15.7" }, "optionalPeers": ["@swc/core"], "bin": { "html-minifier-next": "cli.js" } }, "sha512-iDkgNERz1zgYJgkBz7Z4DboolPiKLioslKxKMh33gJ+QStkoDPp7kCb/3/oLfu5j9sYOUxxxvigCOdsG1chw6g=="],
+    "html-minifier-next": ["html-minifier-next@6.2.0", "", { "dependencies": { "commander": "^14.0.2", "entities": "^8.0.0", "lightningcss": "^1.32.0", "svgo": "^4.0.1", "terser": "^5.46.1" }, "peerDependencies": { "@swc/core": "^1.15.7" }, "optionalPeers": ["@swc/core"], "bin": { "html-minifier-next": "cli.js" } }, "sha512-cX3WG64N6Gb414oKqOQscA/xpAKVyykB6CHODgEmvG5ZkCWcTb6C12HIziEcj/Q1qmb5iLjLxxV8bBCd1HQADg=="],
 
     "html-minifier-terser": ["html-minifier-terser@7.2.0", "", { "dependencies": { "camel-case": "^4.1.2", "clean-css": "~5.3.2", "commander": "^10.0.0", "entities": "^4.4.0", "param-case": "^3.0.4", "relateurl": "^0.2.7", "terser": "^5.15.1" }, "bin": { "html-minifier-terser": "cli.js" } }, "sha512-tXgn3QfqPIpGl9o+K5tpcj3/MN4SfLtsx2GWwBC3SSd0tXQGyF3gsSqad8loJgKZGM3ZxbYDd5yhiBIdWpmvLA=="],
 

@@ -2,7 +2,7 @@
 
 import { existsSync, watch } from "node:fs";
 import { extname, join, relative } from "node:path";
-import { excludedRules } from "./constants.ts";
+import { excludedRules, VERSION } from "./constants.ts";
 
 /**
  * 启动 Watch 模式，监听 srcDir 和 staticDir 的变更并触发重建

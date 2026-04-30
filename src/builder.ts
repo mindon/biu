@@ -1,10 +1,11 @@
 // biu — core build logic
 
 import { build } from "bun";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { mkdir } from "node:fs/promises";
 import { basename, dirname, extname, join, relative, resolve } from "node:path";
 
-import { ASSET_EXTS, MANAGED_EXTS } from "./constants.ts";
+import { ASSET_EXTS, MANAGED_EXTS, VERSION } from "./constants.ts";
 import { scan } from "./utils.ts";
 import { autoInstallDeps } from "./deps.ts";
 import type { DependsMode } from "./cli.ts";
@@ -39,7 +40,7 @@ async function resolveDependencies(
   const extras: Record<string, string> = {};
 
   for (const file of queue) {
-    const code = await readFile(file, "utf8");
+    const code = await Bun.file(file).text();
     const imports = code.matchAll(
       /(?:import|from)\s+["'](\.?\/?.*?\.(ts|js)([#\?][^"']*)?)["']/g,
     );
@@ -87,7 +88,7 @@ async function updateCssUrls(
 ) {
   await Promise.all(
     Array.from(sourceToOutputCss).map(async ([cssSrcFile, cssOutFile]) => {
-      let css = await readFile(cssOutFile, "utf8");
+      let css = await Bun.file(cssOutFile).text();
       let cssChanged = false;
       const cssOutDir = dirname(cssOutFile);
       const cssSrcDir = dirname(cssSrcFile);
@@ -115,7 +116,7 @@ async function updateCssUrls(
         }
       }
       if (cssChanged) {
-        await writeFile(cssOutFile, css);
+        await Bun.write(cssOutFile, css);
       }
     }),
   );
@@ -142,7 +143,7 @@ async function updateJsImports(
     allOutputs
       .filter((output) => output.path.endsWith(".js"))
       .map(async (output) => {
-        let code = await readFile(output.path, "utf8");
+        let code = await Bun.file(output.path).text();
         let changed = false;
 
         // (a) 替换 import/from 中的 module 引用路径
@@ -237,7 +238,7 @@ async function updateJsImports(
         }
 
         if (changed) {
-          await writeFile(output.path, code);
+          await Bun.write(output.path, code);
         }
       }),
   );
@@ -253,7 +254,9 @@ async function processHtmlFiles(
   sourceToOutput: Map<string, string>,
   sourceToOutputCss: Map<string, string>,
   sourceToOutputAsset: Map<string, string>,
-) {
+  forceWrite = false,
+): Promise<number> {
+  let wrote = 0;
   console.log("\nHTML Files Processing:");
   await Promise.all(
     htmlFiles.map(async (file) => {
@@ -334,9 +337,13 @@ async function processHtmlFiles(
 
       const targetPath = file.replace(srcDir, outDir);
       await mkdir(dirname(targetPath), { recursive: true });
-      await writeFile(targetPath, content);
+      if (forceWrite || !existsSync(targetPath)) {
+        await Bun.write(targetPath, content);
+        wrote++;
+      }
     }),
   );
+  return wrote;
 }
 
 /**
@@ -346,7 +353,9 @@ export async function buildProject(
   srcDir: string,
   outDir: string,
   depends?: DependsMode,
+  forceWrite = false,
 ) {
+  const startTime = performance.now();
   const allFiles = (await scan(srcDir)).filter((f) =>
     !f.includes("node_modules") && !f.includes("dist")
   );
@@ -371,7 +380,7 @@ export async function buildProject(
   const htmlContents = await Promise.all(
     htmlFiles.map(async (htmlFile) => ({
       file: htmlFile,
-      content: await readFile(htmlFile, "utf8"),
+      content: await Bun.file(htmlFile).text(),
     })),
   );
   // 拼接所有 HTML 原始内容，用于 basename 出现检测
@@ -410,6 +419,7 @@ export async function buildProject(
   const moduleAbsPaths = new Set(moduleEntries);
 
   // 构建 moduleEntries
+  let jsWrote = 0;
   async function buildModules() {
     for (const file of moduleEntries) {
       const otherModules = new Set(moduleEntries.filter((m) => m !== file));
@@ -417,27 +427,59 @@ export async function buildProject(
         ? createMainPlugin(otherModules)
         : basePlugin;
 
-      const res = await build({
-        entrypoints: [file],
-        outdir: join(outDir, dirname(file.replace(srcDir, ""))),
-        minify: true,
-        target: "browser",
-        naming: "[name].[hash].js",
-        plugins: [plugin],
-      });
-      for (const output of res.outputs) {
-        allOutputs.push(output);
-        sourceToOutput.set(file, output.path);
+      const moduleOutDir = join(outDir, dirname(file.replace(srcDir, "")));
+
+      if (forceWrite) {
+        // --force: let bun.build write directly to disk
+        const res = await build({
+          entrypoints: [file],
+          outdir: moduleOutDir,
+          minify: true,
+          target: "browser",
+          naming: "[name].[hash].js",
+          plugins: [plugin],
+        });
+        for (const output of res.outputs) {
+          allOutputs.push(output);
+          sourceToOutput.set(file, output.path);
+          jsWrote++;
+        }
+      } else {
+        // Default: use writing:false (without outdir, since Bun ignores
+        // writing:false when outdir is set) to get in-memory outputs,
+        // then skip writing if the target file already exists on disk.
+        const res = await build({
+          entrypoints: [file],
+          minify: true,
+          target: "browser",
+          naming: "[name].[hash].js",
+          plugins: [plugin],
+          writing: false,
+        });
+        for (const output of res.outputs) {
+          // output.path is relative (e.g. "./main.abc12345.js"),
+          // resolve it against the intended outdir
+          const outputPath = join(moduleOutDir, basename(output.path));
+          await mkdir(moduleOutDir, { recursive: true });
+          if (!existsSync(outputPath)) {
+            await Bun.write(outputPath, output);
+            jsWrote++;
+          }
+          allOutputs.push({ path: outputPath });
+          sourceToOutput.set(file, outputPath);
+        }
       }
     }
   }
 
   // ── 并行阶段 1：JS build / CSS 编译 / Asset 复制 三路并行 ──
-  const [, sourceToOutputCss, sourceToOutputAsset] = await Promise.all([
+  const [, cssResult, assetResult] = await Promise.all([
     buildModules(),
-    processStyleFiles(styleFiles, srcDir, outDir),
-    processAssetFiles(assetFiles, srcDir, outDir),
+    processStyleFiles(styleFiles, srcDir, outDir, forceWrite),
+    processAssetFiles(assetFiles, srcDir, outDir, forceWrite),
   ]);
+  const sourceToOutputCss = cssResult.map;
+  const sourceToOutputAsset = assetResult.map;
 
   console.log("Source -> Output mapping (JS):");
   for (const [src, out] of sourceToOutput) {
@@ -470,12 +512,46 @@ export async function buildProject(
   ]);
 
   // ── 并行阶段 3：多个 HTML 文件并行处理引用替换 ──
-  await processHtmlFiles(
+  const htmlWrote = await processHtmlFiles(
     htmlFiles,
     srcDir,
     outDir,
     sourceToOutput,
     sourceToOutputCss,
     sourceToOutputAsset,
+    forceWrite,
+  );
+
+  // ── 构建完成摘要 ──
+  const now = new Date();
+  const ts = now.toLocaleString("zh-CN", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  });
+  const parts: string[] = [];
+  if (moduleEntries.length) {
+    parts.push(`📜 js=${jsWrote}/${moduleEntries.length}`);
+  }
+  if (styleFiles.length) {
+    parts.push(`🎨 css=${cssResult.wrote}/${styleFiles.length}`);
+  }
+  if (assetFiles.length) {
+    parts.push(`📦 asset=${assetResult.wrote}/${assetFiles.length}`);
+  }
+  if (htmlFiles.length) parts.push(`🌱 html=${htmlWrote}/${htmlFiles.length}`);
+  const total = jsWrote + cssResult.wrote + assetResult.wrote + htmlWrote;
+  const elapsed = performance.now() - startTime;
+  const duration = elapsed < 1000
+    ? `${elapsed.toFixed(0)}ms`
+    : `${(elapsed / 1000).toFixed(2)}s`;
+  console.log(
+    `\n${VERSION}\n⌯⌲ update ${total} file(s)${
+      parts.length ? `: ${parts.join(", ")}` : ""
+    }\n⊹  ${ts}  ⏱ ${duration}`,
   );
 }
