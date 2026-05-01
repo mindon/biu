@@ -7,6 +7,8 @@ HTML, CSS, and JS.
 
 project repository <https://github.com/mindon/biu>
 
+simply run `biu --serve` within a directory with a **src/**  containing your HTML and TS/JS files, biu take care of everything else.
+
 ## Features
 
 - **Zero-config**: Automatically scans and bundles your project.
