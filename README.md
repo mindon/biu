@@ -86,7 +86,7 @@ bun run biu.ts --build
 
 # Specify output path
 bun run biu.ts --build ./bin/biu
-bun run biu.ts --build /usr/local/bin/biu
+bun run biu.ts --build /usr/local/bin/
 ```
 
 Bun's auto-install will fetch any missing dependencies automatically. The
