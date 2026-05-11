@@ -5,9 +5,13 @@ TypeScript/JavaScript, powered by [Bun](https://bun.sh/). It handles module
 splitting with custom import suffixes and provides built-in minification for
 HTML, CSS, and JS.
 
-project repository <https://github.com/mindon/biu>
+Project repository <https://github.com/mindon/biu>
 
-simply run `biu --serve` within a directory with a **src/**  containing your HTML and TS/JS files, biu take care of everything else.
+Easy to use, just art run `biu --serve` within a directory with a **src/**
+containing your HTML and TS/JS files, biu take care of everything else. (default preview on <http://localhost:3000> )
+
+The oututput directory **./dist** is all static html and JS files ready for
+deployment.
 
 ## Features
 
@@ -124,7 +128,8 @@ Options can appear in any order.
 
 ```bash
 cd demo-project
-biu ./src ./dist
+biu # Equivalent to default ./src and ./dist directories
+# biu ./src ./dist
 ```
 
 **Watch mode:**
@@ -136,13 +141,14 @@ biu --watch
 **Dev server on port 8080:**
 
 ```bash
+# biu --serve # default using 3000
 biu --serve 8080
 ```
 
 **Custom static directory + dev server:**
 
 ```bash
-biu ./src ./dist --static ./public --serve 4000
+biu --static ./public --serve 4000
 ```
 
 **Post-build script:**
