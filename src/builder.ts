@@ -337,7 +337,14 @@ async function processHtmlFiles(
 
       const targetPath = file.replace(srcDir, outDir);
       await mkdir(dirname(targetPath), { recursive: true });
-      if (forceWrite || !existsSync(targetPath)) {
+      // HTML files don't have content hash in their filenames,
+      // so we must compare content to decide whether to update.
+      let needsWrite = forceWrite || !existsSync(targetPath);
+      if (!needsWrite) {
+        const existing = await Bun.file(targetPath).text();
+        needsWrite = existing !== content;
+      }
+      if (needsWrite) {
         await Bun.write(targetPath, content);
         wrote++;
       }
