@@ -54,6 +54,59 @@ function restoreUrls(css: string, originals: string[]): string {
 }
 
 /**
+ * 递归内联 CSS 中的 @import 语句，同时将被引入文件中的 url() 相对路径
+ * 调整为相对于主文件的路径。这样后续 maskUrls 能遮蔽到所有 url()，
+ * 避免 Bun bundler 自行处理并生成不一致的 hash 文件名。
+ */
+async function inlineImports(
+  css: string,
+  cssDir: string,
+  seen = new Set<string>(),
+): Promise<string> {
+  const importRegex =
+    /@import\s+(?:url\(\s*["']?([^"')]+)["']?\s*\)|["']([^"']+)["'])\s*;/g;
+  let result = css;
+  let match;
+  // 收集所有 import，从后往前替换以保持索引稳定
+  const imports: { start: number; end: number; spec: string }[] = [];
+  while ((match = importRegex.exec(css)) !== null) {
+    const spec = match[1] || match[2];
+    if (spec && !spec.startsWith("http://") && !spec.startsWith("https://")) {
+      imports.push({
+        start: match.index,
+        end: match.index + match[0].length,
+        spec,
+      });
+    }
+  }
+  // 从后往前替换
+  for (let i = imports.length - 1; i >= 0; i--) {
+    const { start, end, spec } = imports[i];
+    const importedPath = join(cssDir, spec);
+    if (seen.has(importedPath) || !existsSync(importedPath)) continue;
+    seen.add(importedPath);
+    const importedDir = dirname(importedPath);
+    let importedCss = await Bun.file(importedPath).text();
+    // 递归处理嵌套的 @import
+    importedCss = await inlineImports(importedCss, importedDir, seen);
+    // 调整 url() 相对路径：从 importedDir 相对改为 cssDir 相对
+    if (importedDir !== cssDir) {
+      importedCss = importedCss.replace(
+        /url\(\s*(?!["']?(?:data\s*:|https?:\/\/))([^)]+?)\s*\)/gi,
+        (_m, inner) => {
+          const trimmed = inner.trim().replace(/^["']|["']$/g, "");
+          const abs = join(importedDir, trimmed);
+          const rewritten = relative(cssDir, abs);
+          return `url("${rewritten}")`;
+        },
+      );
+    }
+    result = result.slice(0, start) + importedCss + result.slice(end);
+  }
+  return result;
+}
+
+/**
  * 使用 Bun.build 压缩 CSS 文本（内容已从源文件或 sass 编译结果读入），
  * 返回压缩后的 CSS 文本。为了避开 Bun 对 url() 的强制内联行为，会先把
  * url() 替换成占位符、压缩后再还原。
@@ -64,13 +117,13 @@ async function minifyCssViaBun(
 ): Promise<string> {
   const { masked, originals } = maskUrls(cssSource);
 
-  // 把遮蔽后的 CSS 写到系统临时目录，避免污染源目录、也避免递归 scan
-  // 在下一次构建时把临时文件误认作源文件。
+  // @import 已在 inlineImports() 中被完全内联，Bun.build 不再需要
+  // 解析相对路径，所以临时文件可以安全地放在系统临时目录。
   const tmpDir = join(tmpdir(), "biu-css");
   await mkdir(tmpDir, { recursive: true });
   const tmpFile = join(
     tmpDir,
-    `${basename(sourceHint, extname(sourceHint))}-${
+    `.biu-tmp-${basename(sourceHint, extname(sourceHint))}-${
       contentHash(masked + sourceHint + process.pid + Date.now(), 16)
     }.css`,
   );
@@ -105,9 +158,16 @@ async function minifyCssViaBun(
  */
 export async function compileStyle(filePath: string): Promise<string> {
   const ext = extname(filePath).toLowerCase();
-  const css = ext === ".scss" || ext === ".sass"
-    ? sass.compile(filePath).css
-    : await Bun.file(filePath).text();
+  let css: string;
+  if (ext === ".scss" || ext === ".sass") {
+    // sass.compile 自身会处理 @import / @use
+    css = sass.compile(filePath).css;
+  } else {
+    // 对纯 CSS，先递归内联 @import，使所有 url() 统一在主文件层面，
+    // 后续 maskUrls 才能完整遮蔽，避免 Bun bundler 生成不一致的 hash。
+    css = await Bun.file(filePath).text();
+    css = await inlineImports(css, dirname(filePath));
+  }
   return await minifyCssViaBun(css, filePath);
 }
 

@@ -8,7 +8,8 @@ HTML, CSS, and JS.
 Project repository <https://github.com/mindon/biu>
 
 Easy to use, just art run `biu --serve` within a directory with a **src/**
-containing your HTML and TS/JS files, biu take care of everything else. (default preview on <http://localhost:3000> )
+containing your HTML and TS/JS files, biu take care of everything else. (default
+preview on <http://localhost:3000> )
 
 The oututput directory **./dist** is all static html and JS files ready for
 deployment.

@@ -1,9 +1,13 @@
+@import "./fonts/SF-Mono-Light.css";
+
 h1 {
   color: red;
+  font-family: "SF-Mono-Light";
 }
 
 body:not(:where(.abc, .xyz)) {
   h1 {
+    font-family: "demo";
     color: blue;
   }
   body {
