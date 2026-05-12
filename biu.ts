@@ -83,7 +83,7 @@ async function run() {
       await copyStaticDir(staticDir, outDir, cwd);
     }
     if (staticMode === "static") return;
-    await buildProject(srcDir, outDir, depends, forceWrite);
+    await buildProject(srcDir, outDir, depends, forceWrite, staticDir);
     await postBuild(outDir, postBuildScript);
   }
 

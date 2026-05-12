@@ -257,7 +257,7 @@ async function processHtmlFiles(
   forceWrite = false,
 ): Promise<number> {
   let wrote = 0;
-  console.log("\nHTML Files Processing:");
+  console.log(`\n🌱 HTML Files Processing (${htmlFiles.length}):`);
   await Promise.all(
     htmlFiles.map(async (file) => {
       let content = await processHtml(file);
@@ -361,6 +361,7 @@ export async function buildProject(
   outDir: string,
   depends?: DependsMode,
   forceWrite = false,
+  staticDir?: string | null,
 ) {
   const startTime = performance.now();
   const allFiles = (await scan(srcDir)).filter((f) =>
@@ -488,18 +489,22 @@ export async function buildProject(
   const sourceToOutputCss = cssResult.map;
   const sourceToOutputAsset = assetResult.map;
 
-  console.log("Source -> Output mapping (JS):");
+  console.log(`📜 Source -> Output mapping (${sourceToOutput.size} JS):`);
   for (const [src, out] of sourceToOutput) {
     console.log(`  ${relative(srcDir, src)} -> ${relative(outDir, out)}`);
   }
   if (sourceToOutputCss.size > 0) {
-    console.log("\nSource -> Output mapping (CSS):");
+    console.log(
+      `\n🎨 Source -> Output mapping (${sourceToOutputCss.size} CSS):`,
+    );
     for (const [src, out] of sourceToOutputCss) {
       console.log(`  ${relative(srcDir, src)} -> ${relative(outDir, out)}`);
     }
   }
   if (sourceToOutputAsset.size > 0) {
-    console.log("\nSource -> Output mapping (Assets):");
+    console.log(
+      `\n📦 Source -> Output mapping (${sourceToOutputAsset.size} Assets):`,
+    );
     for (const [src, out] of sourceToOutputAsset) {
       console.log(`  ${relative(srcDir, src)} -> ${relative(outDir, out)}`);
     }
@@ -528,6 +533,90 @@ export async function buildProject(
     sourceToOutputAsset,
     forceWrite,
   );
+
+  // ── 检查引用的资源路径是否存在 ──
+  // 收集 src/ 中所有文件引用的资源路径（非 data:/http:/https:），
+  // 如果引用的文件既不在 src/ 中也不在 static/ 目录中，发出 warning。
+  {
+    const warnings: string[] = [];
+    const knownFiles = new Set(allFiles);
+    const resolvedStaticDir = staticDir ?? undefined;
+
+    // 从 HTML 文件中提取 src/href 引用的非 JS/CSS 资源
+    for (const { file, content } of htmlContents) {
+      const htmlDir = dirname(file);
+      const refs = content.matchAll(
+        /(?:src|href)\s*=\s*["']([^"']+)["']/gi,
+      );
+      for (const m of refs) {
+        const ref = m[1];
+        if (!ref || /^(data:|https?:|\/\/|#)/.test(ref)) continue;
+        // 去掉 query/hash
+        const clean = ref.replace(/[?#].*$/, "");
+        const ext = extname(clean).toLowerCase();
+        // 跳过已被其他处理流程管理的类型
+        if (MANAGED_EXTS.has(ext)) continue;
+        if (!ASSET_EXTS.has(ext)) continue;
+        const abs = resolve(htmlDir, clean);
+        if (knownFiles.has(abs)) continue;
+        // 检查 static/ 中是否有对应文件
+        // 引用的是相对于 HTML 在 dist 中的位置；static/ 会被整体复制到 outDir
+        // 所以需要计算：HTML 输出位置相对 outDir 的相对路径 + 引用路径 → 在 static 中的路径
+        const htmlRelDir = dirname(relative(srcDir, file));
+        const expectedInOut = join(htmlRelDir, clean); // 相对于 outDir 的路径
+        const inStatic = resolvedStaticDir
+          ? join(resolvedStaticDir, expectedInOut)
+          : null;
+        if (inStatic && existsSync(inStatic)) continue;
+        // 也尝试直接用 clean 作为 static 下的路径（兼容直接引用 outDir 根级文件的情况）
+        const inStaticDirect = resolvedStaticDir
+          ? join(resolvedStaticDir, clean)
+          : null;
+        if (inStaticDirect && existsSync(inStaticDirect)) continue;
+        warnings.push(
+          `  ${relative(srcDir, file)}: "${ref}" → missing`,
+        );
+      }
+    }
+
+    // 从 CSS/SCSS 文件中提取 url() 引用
+    for (const file of styleFiles) {
+      const cssDir = dirname(file);
+      const content = await Bun.file(file).text();
+      const urlRefs = content.matchAll(
+        /url\(\s*(?!["']?(?:data\s*:|https?:\/\/))["']?([^"')]+?)["']?\s*\)/gi,
+      );
+      for (const m of urlRefs) {
+        const ref = m[1];
+        if (!ref) continue;
+        const abs = resolve(cssDir, ref);
+        if (knownFiles.has(abs) || existsSync(abs)) continue;
+        // 检查 static/
+        const cssRelDir = dirname(relative(srcDir, file));
+        const expectedInOut = join(cssRelDir, ref);
+        const inStatic = resolvedStaticDir
+          ? join(resolvedStaticDir, expectedInOut)
+          : null;
+        if (inStatic && existsSync(inStatic)) continue;
+        const inStaticDirect = resolvedStaticDir
+          ? join(resolvedStaticDir, ref)
+          : null;
+        if (inStaticDirect && existsSync(inStaticDirect)) continue;
+        warnings.push(
+          `  ${
+            relative(srcDir, file)
+          }: url("${ref}") → not found in src/ or static/`,
+        );
+      }
+    }
+
+    if (warnings.length > 0) {
+      console.warn(
+        `\n⚠️  Warning: ${warnings.length} asset reference(s) in src/ not found in static/:`,
+      );
+      for (const w of warnings) console.warn(w);
+    }
+  }
 
   // ── 构建完成摘要 ──
   const now = new Date();

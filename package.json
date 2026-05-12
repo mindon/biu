@@ -1,6 +1,6 @@
 {
   "name": "biu",
-  "version": "1.0.9",
+  "version": "1.0.10",
   "description": "Zero-config bun build tool with minify and module splitting",
   "main": "index.ts",
   "dependencies": {

@@ -4,6 +4,7 @@ import { existsSync } from "node:fs";
 import { cp, mkdir } from "node:fs/promises";
 import { basename, dirname, extname, join, relative } from "node:path";
 import { contentHash } from "./utils.ts";
+import { scan } from "./utils.ts";
 
 /**
  * 复制静态资源文件到 outDir，加上内容 hash
@@ -59,4 +60,19 @@ export async function copyStaticDir(
       relative(cwd, outDir)
     }`,
   );
+
+  // ── static/ 文件按扩展名统计 ──
+  if (staticDir && existsSync(staticDir)) {
+    const staticFiles = await scan(staticDir);
+    if (staticFiles.length > 0) {
+      const extCounts = new Map<string, number>();
+      for (const f of staticFiles) {
+        const ext = extname(f).toLowerCase() || "(no ext)";
+        extCounts.set(ext, (extCounts.get(ext) ?? 0) + 1);
+      }
+      const sorted = [...extCounts.entries()].sort((a, b) => b[1] - a[1]);
+      const stats = sorted.map(([ext, count]) => `${ext}×${count}`).join(" ");
+      console.log(`   total ${staticFiles.length} = ${stats}\n`);
+    }
+  }
 }
