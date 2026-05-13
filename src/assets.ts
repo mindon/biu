@@ -15,8 +15,13 @@ export async function processAssetFiles(
   srcDir: string,
   outDir: string,
   forceWrite = false,
-): Promise<{ map: Map<string, string>; wrote: number }> {
+): Promise<{
+  map: Map<string, string>;
+  wrote: number;
+  changed: Set<string>;
+}> {
   const sourceToOutputAsset = new Map<string, string>();
+  const changed = new Set<string>();
   let wrote = 0;
   const results = await Promise.all(
     assetFiles.map(async (file) => {
@@ -41,9 +46,12 @@ export async function processAssetFiles(
   );
   for (const [src, out, written] of results) {
     sourceToOutputAsset.set(src, out);
-    if (written) wrote++;
+    if (written) {
+      wrote++;
+      changed.add(src);
+    }
   }
-  return { map: sourceToOutputAsset, wrote };
+  return { map: sourceToOutputAsset, wrote, changed };
 }
 
 /** 将 staticDir 下的所有内容复制到 outDir */

@@ -2,11 +2,11 @@
 
 import { build } from "bun";
 import { existsSync } from "node:fs";
-import { mkdir } from "node:fs/promises";
+import { mkdir, unlink } from "node:fs/promises";
 import { basename, dirname, extname, join, relative, resolve } from "node:path";
 
 import { ASSET_EXTS, MANAGED_EXTS, VERSION } from "./constants.ts";
-import { scan } from "./utils.ts";
+import { hashAssetCached, resetAssetHashCache, scan } from "./utils.ts";
 import { autoInstallDeps } from "./deps.ts";
 import type { DependsMode } from "./cli.ts";
 import { processStyleFiles } from "./styles.ts";
@@ -15,7 +15,88 @@ import { basePlugin, createMainPlugin } from "./plugins.ts";
 import { processHtml } from "./html.ts";
 
 /**
- * 递归解析 JS/TS 依赖
+ * 单个 JS/TS 源文件的扫描结果。整次构建中每个文件只扫描一次，
+ * 跨阶段（resolveDependencies / moduleDeps BFS / asset-ref 收集）共享。
+ */
+interface FileScan {
+  /** 该文件直接 import 的本地 .ts/.js 信息（已解析为绝对路径） */
+  imports: Array<{
+    abs: string;
+    /** 原始 fullPath（含可能的 ?? 或 #/? 后缀）—— 用于判断 force-inline 与 extras */
+    raw: string;
+    /** #/? 后缀（不含主路径） */
+    extra: string;
+    /** 是否 force-inline （?? 标记） */
+    forceInline: boolean;
+  }>;
+  /** 该文件中字符串字面量引用的 asset/CSS 等资源（已解析为绝对路径并经 existsSync 过滤） */
+  assetRefs: string[];
+}
+
+const FILE_IMPORT_TS_RE =
+  /(?:import|from)\s+["'](\.?\/?.*?\.(ts|js)([#\?][^"']*)?)["']/g;
+const FILE_STRING_REF_RE =
+  /["'`](\.{1,2}\/[^"'`\s]+?\.(?:png|jpe?g|gif|svg|webp|avif|bmp|ico|woff2?|ttf|otf|eot|mp4|webm|ogg|mp3|wav|json|css|scss|sass))["'`]/gi;
+
+/**
+ * 创建文件扫描器：统一一次读盘 + 一次正则扫描，结果缓存复用。
+ * jsFileSet: 全部 .ts/.js 源文件集合，用于过滤 imports 是否指向项目内文件。
+ */
+function createFileScanner(jsFileSet: Set<string>) {
+  const cache = new Map<string, Promise<FileScan>>();
+
+  function get(file: string): Promise<FileScan> {
+    let p = cache.get(file);
+    if (p) return p;
+    p = (async (): Promise<FileScan> => {
+      if (!existsSync(file)) {
+        return { imports: [], assetRefs: [] };
+      }
+      const code = await Bun.file(file).text();
+      const dir = dirname(file);
+
+      const imports: FileScan["imports"] = [];
+      for (const m of code.matchAll(FILE_IMPORT_TS_RE)) {
+        const raw = m[1];
+        const cleanSpec = raw.replace(/[#\?].*$/, "");
+        const abs = resolve(dir, cleanSpec);
+        if (!jsFileSet.has(abs) || abs === file) continue;
+        imports.push({
+          abs,
+          raw,
+          extra: m[3] ?? "",
+          forceInline: /\?\?/.test(raw),
+        });
+      }
+
+      const assetRefs: string[] = [];
+      const seen = new Set<string>();
+      for (const m of code.matchAll(FILE_STRING_REF_RE)) {
+        const spec = m[1];
+        const idx = m.index ?? 0;
+        const before = code.slice(Math.max(0, idx - 32), idx);
+        // 排除前面紧跟 import/from 的（那是模块导入，已由 imports 字段处理）
+        if (/(?:import|from)\s*$/i.test(before)) continue;
+        const abs = resolve(dir, spec.replace(/[#\?].*$/, ""));
+        if (abs === file || seen.has(abs)) continue;
+        if (!existsSync(abs)) continue;
+        seen.add(abs);
+        assetRefs.push(abs);
+      }
+
+      return { imports, assetRefs };
+    })();
+    cache.set(file, p);
+    return p;
+  }
+
+  return { get };
+}
+
+type FileScanner = ReturnType<typeof createFileScanner>;
+
+/**
+ * 递归解析 JS/TS 依赖（基于共享 FileScanner，按 BFS 层并发）。
  *
  * htmlRawContents: 所有 HTML 文件的原始内容拼接字符串。
  * 判断规则：如果某个 ts/js 文件的 basename（如 "name.ts"）在任意 HTML 文件内容中
@@ -25,7 +106,7 @@ import { processHtml } from "./html.ts";
 async function resolveDependencies(
   initial: string[],
   initialModules: string[],
-  jsFiles: string[],
+  scanner: FileScanner,
   htmlRawContents: string,
 ): Promise<
   {
@@ -36,40 +117,45 @@ async function resolveDependencies(
 > {
   const deps = new Set<string>(initial);
   const modules = new Set<string>(initialModules);
-  const queue = [...initial, ...initialModules];
   const extras: Record<string, string> = {};
 
-  for (const file of queue) {
-    const code = await Bun.file(file).text();
-    const imports = code.matchAll(
-      /(?:import|from)\s+["'](\.?\/?.*?\.(ts|js)([#\?][^"']*)?)["']/g,
-    );
-    for (const match of imports) {
-      const fullPath = match[1];
-      const depPath = resolve(
-        dirname(file),
-        fullPath.replace(/[#\?].*$/, ""),
-      );
-      if (jsFiles.includes(depPath)) {
-        const tester = new RegExp(
-          `[/'"\`]${basename(depPath).replace(/\./g, "\\.")}[?#'"\`]`,
-        );
-        if (/\?\?/.test(fullPath)) {
+  // BFS：每层并发扫描所有未访问文件的依赖；下层 = 本层新发现的 import 目标。
+  const visited = new Set<string>([...initial, ...initialModules]);
+  let frontier: string[] = [...initial, ...initialModules];
+
+  while (frontier.length > 0) {
+    const scans = await Promise.all(frontier.map((f) => scanner.get(f)));
+    const next: string[] = [];
+    for (const scan of scans) {
+      for (const imp of scan.imports) {
+        const { abs, raw, extra, forceInline } = imp;
+        if (forceInline) {
           // ?? suffix → force inline 到 importer 中
           // 仅将其加入 deps（使 importer bundle 时包含它）
           // 不从 modules 中移除：如果 HTML 直接引用了它，它仍保留独立模块输出
-          deps.add(depPath);
-        } else if (tester.test(htmlRawContents)) {
-          // basename 出现在某个 HTML 中 → 独立模块
-          modules.add(depPath);
-          if (match[3]) extras[depPath] = match[3];
+          deps.add(abs);
         } else {
-          // basename 未在任何 HTML 中出现 → auto inline
-          deps.add(depPath);
+          const tester = new RegExp(
+            `[/'"\`]${basename(abs).replace(/\./g, "\\.")}[?#'"\`]`,
+          );
+          if (tester.test(htmlRawContents)) {
+            // basename 出现在某个 HTML 中 → 独立模块
+            modules.add(abs);
+            if (extra) extras[abs] = extra;
+          } else {
+            // basename 未在任何 HTML 中出现 → auto inline
+            deps.add(abs);
+          }
         }
-        if (!queue.includes(depPath)) queue.push(depPath);
+        if (!visited.has(abs)) {
+          visited.add(abs);
+          next.push(abs);
+        }
+        // 哑元用一下 raw，避免 lint 报"未使用"（实际信息已通过 forceInline/extra 提取）
+        void raw;
       }
     }
+    frontier = next;
   }
 
   return {
@@ -161,8 +247,13 @@ async function updateJsImports(
           }
           const extra = extras?.[srcFile] ?? "";
 
+          // 兜底：替换 import 路径中的 module 引用。
+          // 正常情况下 createMainPlugin + 拓扑构建已经让 bun 直接产出
+          // 正确的 ./<name>.<hash>.js 引用，无需再处理。
+          // 但 force-inline (??) 内联后，被内联代码里如果出现裸的 ./name.js
+          // 引用，仍需修正到带 hash 的真实产物。
           const pattern = new RegExp(
-            `((?:import|from)\\s*["'])([^"']*?\\/?)(${srcBaseName})(\\.(?:js|ts))([^"']*)(["'])`,
+            `((?:import|from)\\s*["'])([^"']*?\\/?)(${srcBaseName})(\\.(?:js|ts|mjs))([^"']*)(["'])`,
             "g",
           );
 
@@ -364,6 +455,8 @@ export async function buildProject(
   staticDir?: string | null,
 ) {
   const startTime = performance.now();
+  // 清空跨构建的 asset hash 缓存（避免 watch / dev 模式下读到陈旧 hash）
+  resetAssetHashCache();
   const allFiles = (await scan(srcDir)).filter((f) =>
     !f.includes("node_modules") && !f.includes("dist")
   );
@@ -410,10 +503,15 @@ export async function buildProject(
     }
   }
 
+  // 共享文件扫描器：每个 .ts/.js 源文件全程只读盘+解析一次，
+  // 跨 resolveDependencies / moduleDeps BFS / asset-ref 收集 三阶段复用。
+  const jsFileSet = new Set(jsFiles);
+  const scanner = createFileScanner(jsFileSet);
+
   const { entrypoints, moduleEntries, extras } = await resolveDependencies(
     initialEntries,
     initialModules,
-    jsFiles,
+    scanner,
     htmlRawContents,
   );
 
@@ -428,11 +526,178 @@ export async function buildProject(
 
   // 构建 moduleEntries
   let jsWrote = 0;
-  async function buildModules() {
+  // 记录本次构建中实际被写盘的源文件（用于在 mapping 列表中标注变更项）
+  const jsChanged = new Set<string>();
+
+  // ── 分析 module 之间的相互依赖（仅 module → module，用于拓扑排序）──
+  // 目的：按依赖拓扑顺序构建，被依赖的先 build，这样 importer 的
+  // external 路径可以直接写出"上游的真实 hash 文件名"，从而让上游变化
+  // 直接进入下游内容指纹 → 触发 bun 真正重新构建（而不是补丁式替换）。
+  const moduleSet = new Set(moduleEntries);
+  const moduleDeps = new Map<string, Set<string>>();
+
+  // 取某个文件的"非 force-inline 的本地 .ts/.js import 绝对路径"列表，
+  // 走共享 scanner（无重复读盘）
+  async function directImportsOf(file: string): Promise<string[]> {
+    const s = await scanner.get(file);
+    const out: string[] = [];
+    for (const imp of s.imports) {
+      // force-inline 的不构成 module 间依赖边（其内容会被 bundle 进 importer，
+      // 故已经体现在 importer 自身的 hash 中）
+      if (imp.forceInline) continue;
+      out.push(imp.abs);
+    }
+    return out;
+  }
+  // 对每个 module entry：从自身出发做 BFS，遇到 module 加入 deps（不再下钻），
+  // 遇到非 module 中转文件（如 auto-inline.ts）继续下钻其 import，
+  // 直至找到所有传递可达的 module。这样：
+  //   hello.ts → auto-inline.ts(非 module) → world2.ts(module)
+  //   会被正确识别为 hello.ts 依赖 world2.ts，从而：
+  //   1) 拓扑排序保证 world2 先 build，hello plugin 能拿到 world2 的最新产物名
+  //   2) world2 改动 → entryHashSeed 变 → hello bundle hash 跟变
+  await Promise.all(
+    moduleEntries.map(async (file) => {
+      const deps = new Set<string>();
+      const visited = new Set<string>([file]);
+      const stack: string[] = [...await directImportsOf(file)];
+      while (stack.length) {
+        const cur = stack.pop()!;
+        if (visited.has(cur)) continue;
+        visited.add(cur);
+        if (moduleSet.has(cur)) {
+          deps.add(cur);
+          // module 是 external 边界，不再下钻其依赖（它自己有自己的 deps 条目）
+          continue;
+        }
+        // 非 module 中转文件：继续展开它的 import
+        const next = await directImportsOf(cur);
+        for (const n of next) if (!visited.has(n)) stack.push(n);
+      }
+      moduleDeps.set(file, deps);
+    }),
+  );
+
+  // 拓扑排序（Kahn）：被依赖的排前面；环检测时降级回原顺序
+  const sortedModules: string[] = [];
+  {
+    const indeg = new Map<string, number>();
+    const reverse = new Map<string, Set<string>>(); // dep → 依赖它的 importer 集合
     for (const file of moduleEntries) {
+      indeg.set(file, 0);
+      reverse.set(file, new Set());
+    }
+    for (const [file, deps] of moduleDeps) {
+      indeg.set(file, deps.size);
+      for (const d of deps) {
+        reverse.get(d)!.add(file);
+      }
+    }
+    const queue: string[] = [];
+    for (const [file, n] of indeg) if (n === 0) queue.push(file);
+    while (queue.length) {
+      const f = queue.shift()!;
+      sortedModules.push(f);
+      for (const importer of reverse.get(f)!) {
+        const n = (indeg.get(importer) ?? 0) - 1;
+        indeg.set(importer, n);
+        if (n === 0) queue.push(importer);
+      }
+    }
+    if (sortedModules.length !== moduleEntries.length) {
+      // 检测到循环依赖：回退到原顺序
+      console.warn(
+        `⚠️  Circular dependency detected among module entries; ` +
+          `falling back to original build order.`,
+      );
+      sortedModules.length = 0;
+      sortedModules.push(...moduleEntries);
+    }
+  }
+
+  // 已构建产物映射（src 绝对路径 → 产物绝对路径），按拓扑顺序累积；
+  // createMainPlugin 通过它把 external 引用写成上游真实文件名（含 hash）
+  const moduleOutputs = new Map<string, string>();
+
+  // ── 预扫每个 module 源码中字符串引用的 asset / CSS 路径 ──
+  // 目的：把这些被引用资源的源内容指纹也纳入 entryHashSeed，
+  //   让 asset/CSS 改动 → entry 产物 hash 变 → 下游 HTML 自动刷新缓存。
+  // 仅扫描字面量字符串路径（如 "./img/foo.png"），跳过 import/from。
+  // 同时也扫 entry 经由非 module 中转文件（被 inline）传递可达的 asset 引用，
+  // 否则中转文件里的字符串引用变化不会触达 entry 的 hash。
+  // 实现：直接复用共享 scanner（同一文件全程仅扫描一次）。
+  const moduleAssetRefs = new Map<string, string[]>(); // entry → 引用资源源文件绝对路径数组
+  await Promise.all(
+    moduleEntries.map(async (file) => {
+      const refs = new Set<string>();
+      // 起点：entry 自身 + 所有传递可达的非 module 中转文件
+      const visited = new Set<string>([file]);
+      const inlineFiles: string[] = [file];
+      const stack: string[] = [file];
+      while (stack.length) {
+        const cur = stack.pop()!;
+        const next = await directImportsOf(cur);
+        for (const n of next) {
+          if (visited.has(n)) continue;
+          visited.add(n);
+          if (moduleSet.has(n)) continue; // module 边界，不再下钻
+          inlineFiles.push(n);
+          stack.push(n);
+        }
+      }
+      const scans = await Promise.all(inlineFiles.map((f) => scanner.get(f)));
+      for (const s of scans) {
+        for (const ref of s.assetRefs) refs.add(ref);
+      }
+      if (refs.size > 0) {
+        moduleAssetRefs.set(file, Array.from(refs).sort());
+      }
+    }),
+  );
+
+  async function buildModules() {
+    // 单 entry 构建逻辑（无副作用前提：每个 entry 只写自己 key 到 moduleOutputs/sourceToOutput）
+    async function buildOne(file: string) {
       const otherModules = new Set(moduleEntries.filter((m) => m !== file));
+
+      // 收集当前 module 的直接依赖产物文件名作为内容指纹种子；
+      // 任意上游产物 hash 变化 → seed 变 → entry 自身产物 hash 变 → 文件名变 → 浏览器/CDN 缓存自动失效。
+      // 用 basename 而不是绝对路径，确保移动 dist 目录不影响 hash。
+      const seedParts: string[] = [];
+      const directDeps = moduleDeps.get(file);
+      if (directDeps && directDeps.size > 0) {
+        const upstream: string[] = [];
+        for (const dep of directDeps) {
+          const out = moduleOutputs.get(dep);
+          if (out) upstream.push(basename(out));
+        }
+        if (upstream.length > 0) {
+          upstream.sort();
+          seedParts.push(`m:${upstream.join(",")}`);
+        }
+      }
+      // 把字符串字面量引用的 asset/CSS 源内容指纹也纳入种子，
+      // 否则 JS 源码不变但其引用的 asset 改名，JS 产物文件名不变，
+      // 引用该 JS 的 HTML 不会刷新 → 浏览器缓存指向的旧 JS 内部仍是旧 asset 名。
+      const assetRefs = moduleAssetRefs.get(file);
+      if (assetRefs && assetRefs.length > 0) {
+        // 内层并发 + 全局缓存（hashAssetCached）：
+        // 同一 asset 被多个 entry / CSS 引用时只读盘 + hash 一次。
+        const aPartsRaw = await Promise.all(
+          assetRefs.map(async (ref) => {
+            const h = await hashAssetCached(ref);
+            return h ? `${basename(ref)}:${h}` : null;
+          }),
+        );
+        const aParts = aPartsRaw.filter((x): x is string => x !== null);
+        if (aParts.length > 0) seedParts.push(`a:${aParts.join(",")}`);
+      }
+      const entryHashSeed = seedParts.length > 0
+        ? seedParts.join("|")
+        : undefined;
+
       const plugin = otherModules.size > 0
-        ? createMainPlugin(otherModules)
+        ? createMainPlugin(otherModules, moduleOutputs, file, entryHashSeed)
         : basePlugin;
 
       const moduleOutDir = join(outDir, dirname(file.replace(srcDir, "")));
@@ -450,12 +715,16 @@ export async function buildProject(
         for (const output of res.outputs) {
           allOutputs.push(output);
           sourceToOutput.set(file, output.path);
+          moduleOutputs.set(file, output.path);
           jsWrote++;
+          jsChanged.add(file);
         }
       } else {
         // Default: use writing:false (without outdir, since Bun ignores
         // writing:false when outdir is set) to get in-memory outputs,
         // then skip writing if the target file already exists on disk.
+        // 因为 __biu_upstream__ seed 机制已确保上游变化→hash 变→文件名变，
+        // 所以文件名相同意味着源码+上游都没变，产物内容一定正确，直接 skip。
         const res = await build({
           entrypoints: [file],
           minify: true,
@@ -468,15 +737,56 @@ export async function buildProject(
           // output.path is relative (e.g. "./main.abc12345.js"),
           // resolve it against the intended outdir
           const outputPath = join(moduleOutDir, basename(output.path));
-          await mkdir(moduleOutDir, { recursive: true });
           if (!existsSync(outputPath)) {
+            await mkdir(moduleOutDir, { recursive: true });
             await Bun.write(outputPath, output);
             jsWrote++;
+            jsChanged.add(file);
           }
           allOutputs.push({ path: outputPath });
           sourceToOutput.set(file, outputPath);
+          moduleOutputs.set(file, outputPath);
         }
       }
+    }
+
+    // 同层并发拓扑调度：
+    //   依赖关系仅约束"上游必须先于下游"；同一层（互不依赖）的 entry 可并发 build。
+    //   sortedModules 已是 Kahn 拓扑序（或循环时回退为原顺序），
+    //   按"已构建集合是否覆盖其所有依赖"分层。
+    const built = new Set<string>();
+    let pending = sortedModules.slice();
+    while (pending.length > 0) {
+      const layer: string[] = [];
+      const rest: string[] = [];
+      for (const f of pending) {
+        const deps = moduleDeps.get(f);
+        if (!deps || deps.size === 0) {
+          layer.push(f);
+        } else {
+          let ready = true;
+          for (const d of deps) {
+            if (moduleSet.has(d) && !built.has(d)) {
+              ready = false;
+              break;
+            }
+          }
+          (ready ? layer : rest).push(f);
+        }
+      }
+      if (layer.length === 0) {
+        // 防御：理论上拓扑序保证不会出现，仅在循环回退场景兜底，
+        // 此时按原顺序串行剩余项以保证可完成。
+        for (const f of rest) {
+          // eslint-disable-next-line no-await-in-loop
+          await buildOne(f);
+          built.add(f);
+        }
+        break;
+      }
+      await Promise.all(layer.map(buildOne));
+      for (const f of layer) built.add(f);
+      pending = rest;
     }
   }
 
@@ -488,25 +798,44 @@ export async function buildProject(
   ]);
   const sourceToOutputCss = cssResult.map;
   const sourceToOutputAsset = assetResult.map;
+  const cssChanged = cssResult.changed;
+  const assetChanged = assetResult.changed;
 
-  console.log(`📜 Source -> Output mapping (${sourceToOutput.size} JS):`);
+  // mapping 列表中：变化的项前面带 "*"，未变化的用 " "（对齐）
+  const mark = (changed: boolean) => (changed ? "*" : " ");
+
+  console.log(
+    `📜 Source -> Output mapping (${sourceToOutput.size} JS, ${jsChanged.size} changed):`,
+  );
   for (const [src, out] of sourceToOutput) {
-    console.log(`  ${relative(srcDir, src)} -> ${relative(outDir, out)}`);
+    console.log(
+      ` ${mark(jsChanged.has(src))} ${relative(srcDir, src)} -> ${
+        relative(outDir, out)
+      }`,
+    );
   }
   if (sourceToOutputCss.size > 0) {
     console.log(
-      `\n🎨 Source -> Output mapping (${sourceToOutputCss.size} CSS):`,
+      `\n🎨 Source -> Output mapping (${sourceToOutputCss.size} CSS, ${cssChanged.size} changed):`,
     );
     for (const [src, out] of sourceToOutputCss) {
-      console.log(`  ${relative(srcDir, src)} -> ${relative(outDir, out)}`);
+      console.log(
+        ` ${mark(cssChanged.has(src))} ${relative(srcDir, src)} -> ${
+          relative(outDir, out)
+        }`,
+      );
     }
   }
   if (sourceToOutputAsset.size > 0) {
     console.log(
-      `\n📦 Source -> Output mapping (${sourceToOutputAsset.size} Assets):`,
+      `\n📦 Source -> Output mapping (${sourceToOutputAsset.size} Assets, ${assetChanged.size} changed):`,
     );
     for (const [src, out] of sourceToOutputAsset) {
-      console.log(`  ${relative(srcDir, src)} -> ${relative(outDir, out)}`);
+      console.log(
+        ` ${mark(assetChanged.has(src))} ${relative(srcDir, src)} -> ${
+          relative(outDir, out)
+        }`,
+      );
     }
   }
 
@@ -618,6 +947,62 @@ export async function buildProject(
     }
   }
 
+  // ── 清理 dist/ 中的孤儿 hash 产物 ──
+  // 当上游文件改变后，下游产物的 content hash 也会改变 → 旧 hash 文件成为孤儿。
+  // 这里识别并删除：文件名带 hash 但不在本次构建的输出集合中的产物。
+  // 安全保护：跳过 static/ 中存在的同路径文件、HTML 文件、未带 hash 模式的文件。
+  let cleaned = 0;
+  try {
+    if (existsSync(outDir)) {
+      // 收集本次构建所有合法输出（绝对路径）
+      const validOutputs = new Set<string>();
+      for (const p of sourceToOutput.values()) validOutputs.add(p);
+      for (const p of sourceToOutputCss.values()) validOutputs.add(p);
+      for (const p of sourceToOutputAsset.values()) validOutputs.add(p);
+      for (const o of allOutputs) {
+        if (o?.path) validOutputs.add(o.path);
+      }
+      // HTML 输出位置也需要保护（HTML 不带 hash，但显式列出更稳妥）
+      for (const f of htmlFiles) {
+        validOutputs.add(f.replace(srcDir, outDir));
+      }
+
+      // 收集 staticDir 下所有相对路径，用于保护被 copyStaticDir 复制过来的文件
+      const staticRelPaths = new Set<string>();
+      if (staticDir && existsSync(staticDir)) {
+        for (const sf of await scan(staticDir)) {
+          staticRelPaths.add(relative(staticDir, sf));
+        }
+      }
+
+      // hash 模式：
+      //   JS:        name.HASH.js     (e.g. main.s5aj6zwp.js)
+      //   CSS/Asset: name-HASH.ext    (e.g. styles-d4496399.css, mindon-3dadbdab.png)
+      //   hash 长度 6-32，字母数字
+      const HASH_DOT_RE = /\.[a-z0-9]{6,32}\.(js|mjs|css)$/i;
+      const HASH_DASH_RE = /-[a-z0-9]{6,32}\.[a-z0-9]+$/i;
+
+      const distFiles = await scan(outDir);
+      // 先筛出待删除候选，再 Promise.all 并发 unlink（IO 并发收益）
+      const toDelete: string[] = [];
+      for (const f of distFiles) {
+        if (validOutputs.has(f)) continue;
+        const rel = relative(outDir, f);
+        if (staticRelPaths.has(rel)) continue;
+        const base = basename(f);
+        const isHashed = HASH_DOT_RE.test(base) || HASH_DASH_RE.test(base);
+        if (!isHashed) continue;
+        toDelete.push(f);
+      }
+      const results = await Promise.all(
+        toDelete.map((f) => unlink(f).then(() => true, () => false)),
+      );
+      cleaned = results.reduce((n, ok) => n + (ok ? 1 : 0), 0);
+    }
+  } catch (err) {
+    console.warn(`⚠️  Cleanup warning: ${(err as Error).message}`);
+  }
+
   // ── 构建完成摘要 ──
   const now = new Date();
   const ts = now.toLocaleString("zh-CN", {
@@ -640,6 +1025,7 @@ export async function buildProject(
     parts.push(`📦 asset=${assetResult.wrote}/${assetFiles.length}`);
   }
   if (htmlFiles.length) parts.push(`🌱 html=${htmlWrote}/${htmlFiles.length}`);
+  // if (cleaned > 0) parts.push(`🧹 cleaned=${cleaned}`);
   const total = jsWrote + cssResult.wrote + assetResult.wrote + htmlWrote;
   const elapsed = performance.now() - startTime;
   const duration = elapsed < 1000

@@ -7,7 +7,7 @@ import { existsSync } from "node:fs";
 import { mkdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, extname, join, relative } from "node:path";
-import { contentHash } from "./utils.ts";
+import { contentHash, hashAssetCached } from "./utils.ts";
 
 /**
  * CleanCSS 单例，仍然用于 **字符串级别** 的 CSS 压缩场景
@@ -172,6 +172,50 @@ export async function compileStyle(filePath: string): Promise<string> {
 }
 
 /**
+ * 收集 CSS 中 url() 所引用的本地资源源文件路径（按 cssDir 解析），
+ * 跳过 data: / http(s): / 占位符。返回去重后的相对/绝对路径数组。
+ */
+function collectCssUrlRefs(css: string, cssDir: string): string[] {
+  const refs = new Set<string>();
+  const re =
+    /url\(\s*(?!["']?(?:data\s*:|https?:\/\/))["']?([^"')]+?)["']?\s*\)/gi;
+  for (const m of css.matchAll(re)) {
+    const ref = m[1]?.trim();
+    if (!ref) continue;
+    // 去掉 query / hash
+    const clean = ref.replace(/[?#].*$/, "");
+    if (!clean) continue;
+    refs.add(join(cssDir, clean));
+  }
+  return Array.from(refs);
+}
+
+/**
+ * 把 CSS 引用的 asset 源内容指纹拼接到 CSS 自身指纹输入中，
+ * 使得 asset 变化 → CSS 产物文件名 hash 变化 → 下游（HTML）随之刷新。
+ * 这样在并行管线中也能保证 CSS hash 反映上游 asset 变更。
+ */
+async function computeStyleHashSeed(
+  css: string,
+  cssDir: string,
+): Promise<string> {
+  const refs = collectCssUrlRefs(css, cssDir);
+  if (refs.length === 0) return "";
+  // 排序保证顺序稳定
+  refs.sort();
+  // 内层并发 + 全局缓存（hashAssetCached）：
+  // 同一 asset 被多个 CSS / JS entry 引用时只读盘 + hash 一次。
+  // 不存在的文件 hashAssetCached 返回 null，跳过即可。
+  const partsRaw = await Promise.all(
+    refs.map(async (ref) => {
+      const h = await hashAssetCached(ref);
+      return h ? `${basename(ref)}:${h}` : null;
+    }),
+  );
+  return partsRaw.filter((x): x is string => x !== null).join(",");
+}
+
+/**
  * 处理所有 scss / css 文件：编译 → 压缩 → 带 hash 输出
  * 返回 sourceToOutputCss 映射 (源绝对路径 → 输出绝对路径)
  */
@@ -180,13 +224,23 @@ export async function processStyleFiles(
   srcDir: string,
   outDir: string,
   forceWrite = false,
-): Promise<{ map: Map<string, string>; wrote: number }> {
+): Promise<{
+  map: Map<string, string>;
+  wrote: number;
+  changed: Set<string>;
+}> {
   const sourceToOutputCss = new Map<string, string>();
+  const changed = new Set<string>();
   let wrote = 0;
   const results = await Promise.all(
     styleFiles.map(async (file) => {
       const css = await compileStyle(file);
-      const hash = contentHash(css);
+      // 把 CSS 引用到的 asset 内容指纹也纳入 CSS 自身 hash 输入，
+      // 否则 asset 改名后 CSS 文件名不变，下游 HTML 也不会刷新缓存。
+      const seed = await computeStyleHashSeed(css, dirname(file));
+      const hash = contentHash(
+        seed ? `${css}\n/*__biu_assets__:${seed}*/` : css,
+      );
       const name = basename(file).replace(/\.(scss|sass|css)$/, "");
       const outputName = `${name}-${hash}.css`;
       const relDir = dirname(relative(srcDir, file));
@@ -203,7 +257,10 @@ export async function processStyleFiles(
   );
   for (const [src, out, written] of results) {
     sourceToOutputCss.set(src, out);
-    if (written) wrote++;
+    if (written) {
+      wrote++;
+      changed.add(src);
+    }
   }
-  return { map: sourceToOutputCss, wrote };
+  return { map: sourceToOutputCss, wrote, changed };
 }
