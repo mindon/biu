@@ -369,7 +369,13 @@ async function processHtmlFiles(
             "g",
           ),
           (_match, q1, extra, q2) => {
-            const relOutput = relative(targetDirForJs, outputFile);
+            let relOutput = relative(targetDirForJs, outputFile);
+            // ES module specifiers (e.g. inline `<script type="module">`'s
+            // `import "./foo.ts"`) must start with "/", "./" or "../".
+            // For same-directory bare filenames, restore the "./" prefix.
+            if (!relOutput.startsWith(".") && !relOutput.startsWith("/")) {
+              relOutput = `./${relOutput}`;
+            }
             return `${q1}${relOutput}${extra ?? ""}${q2}`;
           },
         );

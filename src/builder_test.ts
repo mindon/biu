@@ -65,6 +65,26 @@ describe("buildProject — integration", () => {
     }
   });
 
+  test("inline <script type=module> imports keep './' prefix for same-dir files", async () => {
+    try {
+      await buildProject(demoSrc, tmpOut);
+
+      const worldHtml = await Bun.file(join(tmpOut, "hey", "world.html"))
+        .text();
+      // ES module specifiers must start with "/", "./" or "../" — a bare
+      // "world2.<hash>.js" would throw `Failed to resolve module specifier`.
+      expect(worldHtml).toMatch(
+        /import\s*\{\s*TIMESTAMP\s*\}\s*from\s*["']\.\/world2[.\-][0-9a-z]+\.js["']/,
+      );
+      // Must NOT produce a bare specifier import.
+      expect(worldHtml).not.toMatch(
+        /from\s*["']world2[.\-][0-9a-z]+\.js/,
+      );
+    } finally {
+      await rm(tmpOut, { recursive: true, force: true });
+    }
+  });
+
   test("CSS output contains minified content", async () => {
     try {
       await buildProject(demoSrc, tmpOut);

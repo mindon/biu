@@ -5,12 +5,13 @@
   </head>
   <body>
     <script src="force-inline.ts" type="module"></script>
-    <script src="hello.ts?nothing"></script>
+    <script type="module" src="hello.ts?nothing"></script>
     <script type="module" src="world.ts"></script>
     <script type="module" src="world2.ts"></script>
     <script type="module">
       import { demo } from "../demo.ts#something";
-      console.log(demo);
+      import { TIMESTAMP2 } from "./world2.ts";
+      console.log(demo, TIMESTAMP2);
     </script>
     <h1>Hello World</h1>
     <img src="../clavis.png" />
