@@ -467,6 +467,99 @@ export async function autoInstallDeps(
 // ======================== 安装 & 交互 ========================
 
 /**
+ * 检测 `bun` CLI 是否在 PATH 中可用。
+ * 通过执行 `bun --version` 探测；任意异常或非 0 退出码均视为不可用。
+ * 结果缓存到模块作用域，避免重复探测。
+ */
+let _bunAvailable: boolean | undefined;
+async function isBunAvailable(): Promise<boolean> {
+  if (_bunAvailable !== undefined) return _bunAvailable;
+  try {
+    const proc = Bun.spawn(["bun", "--version"], {
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+    const code = await proc.exited;
+    _bunAvailable = code === 0;
+  } catch {
+    _bunAvailable = false;
+  }
+  return _bunAvailable;
+}
+
+/**
+ * 尝试自动安装 Bun 运行时。
+ * - macOS / Linux: 通过官方一键脚本 `curl -fsSL https://bun.sh/install | bash`
+ * - Windows: 通过 PowerShell `irm bun.sh/install.ps1 | iex`
+ *
+ * 安装到默认位置后，将 `~/.bun/bin`（或 Windows 的 `%USERPROFILE%\.bun\bin`）
+ * 追加到当前进程的 PATH，使后续 `Bun.spawn(["bun", ...])` 可以找到二进制。
+ *
+ * 返回安装并探测成功与否。
+ */
+async function tryInstallBun(): Promise<boolean> {
+  const platform = process.platform;
+  console.log(`\n🚀 Attempting to install Bun automatically (${platform})…`);
+
+  let cmd: string[];
+  if (platform === "win32") {
+    // PowerShell one-liner from https://bun.sh
+    cmd = [
+      "powershell",
+      "-NoProfile",
+      "-ExecutionPolicy",
+      "Bypass",
+      "-Command",
+      "irm bun.sh/install.ps1 | iex",
+    ];
+  } else {
+    // bash + curl one-liner from https://bun.sh
+    cmd = ["bash", "-c", "curl -fsSL https://bun.sh/install | bash"];
+  }
+
+  try {
+    const proc = Bun.spawn(cmd, {
+      stdout: "inherit",
+      stderr: "inherit",
+    });
+    const code = await proc.exited;
+    if (code !== 0) {
+      console.error(`❌ Bun installer exited with code ${code}.`);
+      return false;
+    }
+  } catch (err) {
+    console.error(`❌ Failed to launch Bun installer:`, err);
+    return false;
+  }
+
+  // 将默认 bun 安装目录追加到 PATH 以便当前进程能立刻使用
+  const home = process.env.HOME || process.env.USERPROFILE || "";
+  if (home) {
+    const bunBin = platform === "win32"
+      ? `${home}\\.bun\\bin`
+      : `${home}/.bun/bin`;
+    const sep = platform === "win32" ? ";" : ":";
+    const currentPath = process.env.PATH || "";
+    if (!currentPath.split(sep).includes(bunBin)) {
+      process.env.PATH = `${bunBin}${sep}${currentPath}`;
+    }
+  }
+
+  // 重新探测
+  _bunAvailable = undefined;
+  const ok = await isBunAvailable();
+  if (ok) {
+    console.log(`✅ Bun installed and ready.\n`);
+  } else {
+    console.error(
+      `❌ Bun installer finished but \`bun\` is still not available in PATH.\n` +
+        `   You may need to restart your shell, or add Bun's bin directory to PATH manually.`,
+    );
+  }
+  return ok;
+}
+
+/**
  * 执行 bun add 安装缺失包，并更新缓存
  */
 async function installPackages(
@@ -479,6 +572,22 @@ async function installPackages(
     `\n📦 Auto-installing missing dependencies: ${missing.join(", ")}`,
   );
   console.log(`   install dir: ${installDir}`);
+
+  if (!(await isBunAvailable())) {
+    console.warn(
+      `⚠️  \`bun\` CLI not found in PATH — will try to install Bun first.`,
+    );
+    const installed = await tryInstallBun();
+    if (!installed) {
+      console.error(
+        `❌ Cannot auto-install dependencies without \`bun\`.\n` +
+          `   Install Bun manually from https://bun.sh, or rerun with ` +
+          `\`--depends json\` to record deps to package.json instead.\n` +
+          `   Missing: ${missing.join(", ")}`,
+      );
+      process.exit(1);
+    }
+  }
 
   const proc = Bun.spawn(["bun", "add", ...missing], {
     cwd: installDir,

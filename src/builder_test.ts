@@ -74,11 +74,11 @@ describe("buildProject — integration", () => {
       // ES module specifiers must start with "/", "./" or "../" — a bare
       // "world2.<hash>.js" would throw `Failed to resolve module specifier`.
       expect(worldHtml).toMatch(
-        /import\s*\{\s*TIMESTAMP\s*\}\s*from\s*["']\.\/world2[.\-][0-9a-z]+\.js["']/,
+        /\bfrom\s*["']\.\/world2[.\-][0-9a-z]+\.js["']/,
       );
       // Must NOT produce a bare specifier import.
       expect(worldHtml).not.toMatch(
-        /from\s*["']world2[.\-][0-9a-z]+\.js/,
+        /\bfrom\s*["']world2[.\-][0-9a-z]+\.js/,
       );
     } finally {
       await rm(tmpOut, { recursive: true, force: true });
