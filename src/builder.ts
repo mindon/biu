@@ -922,7 +922,7 @@ export async function buildProject(
         /url\(\s*(?!["']?(?:data\s*:|https?:\/\/))["']?([^"')]+?)["']?\s*\)/gi,
       );
       for (const m of urlRefs) {
-        const ref = m[1];
+        const ref = m[1].replace(/[?#].*$/, '');
         if (!ref) continue;
         const abs = resolve(cssDir, ref);
         if (knownFiles.has(abs) || existsSync(abs)) continue;
@@ -940,14 +940,14 @@ export async function buildProject(
         warnings.push(
           `  ${
             relative(srcDir, file)
-          }: url("${ref}") → not found in src/ or static/`,
+          }: url("${ref}") → missing`,
         );
       }
     }
 
     if (warnings.length > 0) {
       console.warn(
-        `\n⚠️  Warning: ${warnings.length} asset reference(s) in src/ not found in static/:`,
+        `\n⚠️  Warning: ${warnings.length} asset reference(s) in src/ not found in src/ or static/:`,
       );
       for (const w of warnings) console.warn(w);
     }
