@@ -271,11 +271,35 @@ export function extractImportSpecs(code: string): Set<string> {
   return specs;
 }
 
+/**
+ * 剥离 specifier 末尾的 `?query` 与 `#hash`（按先出现者切断）。
+ * 例如 `dayjs/plugin/utc?v=1` -> `dayjs/plugin/utc`，
+ * `pkg#hash` -> `pkg`。
+ */
+function stripSpecSuffix(spec: string): string {
+  let end = spec.length;
+  const q = spec.indexOf("?");
+  if (q >= 0) end = q;
+  const h = spec.indexOf("#");
+  if (h >= 0 && h < end) end = h;
+  return spec.slice(0, end);
+}
+
 /** 从 specifier 提取 npm 包名（@scope/pkg 或 pkg），无效则返回空串 */
 /** @internal — exported for testing */
 export function specToPackageName(spec: string): string {
-  const parts = spec.split("/");
-  const name = parts[0].startsWith("@") ? `${parts[0]}/${parts[1]}` : parts[0];
+  // 先剥离 ?query / #hash 后缀，再按 / 切分
+  const clean = stripSpecSuffix(spec);
+  if (!clean) return "";
+  const parts = clean.split("/");
+  let name: string;
+  if (parts[0].startsWith("@")) {
+    // scoped 包必须带子段，单独的 `@scope` 视为无效
+    if (parts.length < 2 || !parts[1]) return "";
+    name = `${parts[0]}/${parts[1]}`;
+  } else {
+    name = parts[0];
+  }
   return isValidPackageName(name) ? name : "";
 }
 
@@ -384,8 +408,13 @@ export async function autoInstallDeps(
       const code = await Bun.file(file).text();
       const dir = dirname(file);
       for (const spec of extractImportSpecs(code)) {
-        // 检查 spec 是否指向本地文件（相对于当前文件目录解析）
-        const localPath = join(dir, spec);
+        // extractImportSpecs 已过滤掉相对路径/绝对路径/URL/node:|bun:
+        // 但 spec 仍可能携带 ?query / #hash 后缀，需先剥离再做本地路径判断
+        const cleanSpec = stripSpecSuffix(spec);
+        if (!cleanSpec) continue;
+        // 防御性：如果 srcDir 内恰好存在与 spec 同名的目录/文件
+        // （例如内部 alias 指向源码内某个目录），视为本地依赖跳过
+        const localPath = join(dir, cleanSpec);
         if (existsSync(localPath)) continue;
         const name = specToPackageName(spec);
         if (name) allPkgs.add(name);

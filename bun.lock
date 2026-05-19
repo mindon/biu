@@ -89,7 +89,7 @@
 
     "entities": ["entities@8.0.0", "", {}, "sha512-zwfzJecQ/Uej6tusMqwAqU/6KL2XaB2VZ2Jg54Je6ahNBGNH6Ek6g3jjNCF0fG9EWQKGZNddNjU5F1ZQn/sBnA=="],
 
-    "html-minifier-next": ["html-minifier-next@6.2.4", "", { "dependencies": { "commander": "^14.0.3", "entities": "^8.0.0", "lightningcss": "^1.32.0", "svgo": "^4.0.1", "terser": "^5.46.2" }, "peerDependencies": { "@swc/core": "^1.15.7" }, "optionalPeers": ["@swc/core"], "bin": { "html-minifier-next": "cli.js" } }, "sha512-fXl7l9FIWGXZASk4E4qlA6XlAc6ECuVxq5bWhjgoQwFiCqm2xrzIq86I5B7XzV9CP5SmmSqB4z5b4fMH/v3pmA=="],
+    "html-minifier-next": ["html-minifier-next@6.2.6", "", { "dependencies": { "commander": "^14.0.3", "entities": "^8.0.0", "lightningcss": "^1.32.0", "svgo": "^4.0.1", "terser": "^5.46.2" }, "peerDependencies": { "@swc/core": "^1.15.7" }, "optionalPeers": ["@swc/core"], "bin": { "html-minifier-next": "cli.js", "hmn": "cli.js" } }, "sha512-M7wfbuXj8YePrWucceM01F2IjBcxmE6Z1Lfj2yKkZpCzk/lIpsYCAQF7cM9gDNxhBUJyM7FKlOzQ/VEM7JEtsw=="],
 
     "html-minifier-terser": ["html-minifier-terser@7.2.0", "", { "dependencies": { "camel-case": "^4.1.2", "clean-css": "~5.3.2", "commander": "^10.0.0", "entities": "^4.4.0", "param-case": "^3.0.4", "relateurl": "^0.2.7", "terser": "^5.15.1" }, "bin": { "html-minifier-terser": "cli.js" } }, "sha512-tXgn3QfqPIpGl9o+K5tpcj3/MN4SfLtsx2GWwBC3SSd0tXQGyF3gsSqad8loJgKZGM3ZxbYDd5yhiBIdWpmvLA=="],
 

@@ -94,6 +94,72 @@ describe("specToPackageName", () => {
     expect(specToPackageName(".hidden")).toBe("");
     expect(specToPackageName("_private")).toBe("");
   });
+
+  // ---- 含 ?query / #hash 后缀（bundler / loader 常见用法）----
+  test("strips ?query suffix on bare package", () => {
+    expect(specToPackageName("dayjs?v=1")).toBe("dayjs");
+    expect(specToPackageName("lodash-es?worker")).toBe("lodash-es");
+  });
+
+  test("strips ?query suffix on package with subpath", () => {
+    expect(specToPackageName("dayjs/plugin/utc?v=1")).toBe("dayjs");
+    expect(specToPackageName("react/jsx-runtime?bundle")).toBe("react");
+  });
+
+  test("strips #hash suffix", () => {
+    expect(specToPackageName("lodash-es#hash")).toBe("lodash-es");
+    expect(specToPackageName("dayjs/plugin/utc#main")).toBe("dayjs");
+  });
+
+  test("strips ?query on scoped package", () => {
+    expect(specToPackageName("@vue/reactivity?worker")).toBe("@vue/reactivity");
+    expect(specToPackageName("@scope/pkg-name?query")).toBe("@scope/pkg-name");
+  });
+
+  test("strips #hash on scoped package with subpath", () => {
+    expect(specToPackageName("@vue/reactivity/dist/index#esm")).toBe(
+      "@vue/reactivity",
+    );
+  });
+
+  test("strips both ?query and #hash, taking earliest", () => {
+    expect(specToPackageName("dayjs?v=1#frag")).toBe("dayjs");
+    expect(specToPackageName("dayjs#frag?v=1")).toBe("dayjs");
+  });
+
+  // ---- 退化的 scope-only spec 应视为无效 ----
+  test("scope-only spec is invalid", () => {
+    expect(specToPackageName("@scope")).toBe("");
+    expect(specToPackageName("@scope?v=1")).toBe("");
+    expect(specToPackageName("@scope/")).toBe("");
+  });
+
+  // ---- 多子入口 npm 包（如 echarts 通过 exports 暴露 /core、/charts 等）----
+  test("npm package with multiple subpath entries (echarts)", () => {
+    expect(specToPackageName("echarts/core")).toBe("echarts");
+    expect(specToPackageName("echarts/charts")).toBe("echarts");
+    expect(specToPackageName("echarts/components")).toBe("echarts");
+    expect(specToPackageName("echarts/renderers")).toBe("echarts");
+    expect(specToPackageName("echarts/lib/echarts")).toBe("echarts");
+    expect(specToPackageName("echarts/core?v=5")).toBe("echarts");
+  });
+
+  test("extractImportSpecs picks up echarts subpath imports", () => {
+    const code = `
+      import * as echarts from 'echarts/core';
+      import { BarChart } from "echarts/charts";
+      import { GridComponent } from 'echarts/components';
+      import { CanvasRenderer } from "echarts/renderers";
+    `;
+    const specs = [...extractImportSpecs(code)];
+    expect(specs).toContain("echarts/core");
+    expect(specs).toContain("echarts/charts");
+    expect(specs).toContain("echarts/components");
+    expect(specs).toContain("echarts/renderers");
+    // 全部应归一到同一个安装包名
+    const pkgs = new Set(specs.map(specToPackageName));
+    expect(pkgs).toEqual(new Set(["echarts"]));
+  });
 });
 
 // ==================== stripNonImportStringsAndComments ====================
