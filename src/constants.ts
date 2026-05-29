@@ -12,7 +12,7 @@ Options:
   --watch              Watch mode
   --static <dir>       Static directory (default: ./static)
   --post-build <file>  Run .sh/.ts/.js script after build (receives outDir as $1)
-  --serve [port]       Serve static files (default port: 3000)
+  --serve [port]       Serve and watch static files and backend if provided (default port: 3000)
   --depends [mode]     Dependency handling (default: auto)
                          auto            Auto-detect and install missing deps
                          confirm         List deps and prompt y/n before install

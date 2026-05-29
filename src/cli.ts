@@ -28,6 +28,8 @@ export interface CliArgs {
   biu?: string;
   version?: string;
   usage?: string;
+  backendDir?: string;
+  backendStyle?: string;
 }
 
 /** 解析命令行参数 */
@@ -43,6 +45,8 @@ export function parseArgs(): CliArgs {
   }
   let srcDir = "./src";
   let outDir = "./dist";
+  let backendDir = "";
+  let backendStyle = "nextjs";
   let isWatch = false;
   let staticDir: string | null = "./static"; // 缺省值
   let servePort: number | null = null;
@@ -76,6 +80,12 @@ export function parseArgs(): CliArgs {
       case "--post-build":
         postBuildScript = args[++i];
         break;
+      case "--apis":
+        backendDir = args[++i];
+        break;
+      case "--api-style":
+        backendStyle = args[++i] ?? "nextjs";
+        break;
       case "--serve": {
         const next = args[i + 1];
         servePort = next && !next.startsWith("-")
@@ -108,6 +118,8 @@ export function parseArgs(): CliArgs {
     postBuildScript,
     depends,
     forceWrite,
+    backendDir,
+    backendStyle,
   };
 }
 

@@ -29,6 +29,8 @@ async function run() {
     postBuildScript,
     depends,
     forceWrite,
+    backendDir,
+    backendStyle,
   } = parseArgs();
 
   if (version) {
@@ -94,7 +96,7 @@ async function run() {
     startWatcher(srcDir, staticDir, cwd, fullBuild);
 
     if (servePort) {
-      startDevServer(outDir, servePort, cwd);
+      startDevServer(outDir, servePort, cwd, backendDir, backendStyle);
     }
   }
 }

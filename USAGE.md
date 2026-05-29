@@ -12,6 +12,8 @@ biu ./src ./dist           # Explicit source & output dirs
 biu --serve 3000           # Dev server with live reload
 ```
 
+_Note: if there's a **./backend** directory, it will be used as [Next.js](https://nextjs.org) style backend._
+
 ## Command Syntax
 
 ```
