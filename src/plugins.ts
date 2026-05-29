@@ -1,11 +1,26 @@
 // biu — Bun build plugins
 
 import type { Plugin } from "bun";
+import { realpathSync } from "node:fs";
 import { dirname, relative, resolve } from "node:path";
 import { minifyHTMLLiterals } from "../plugins/minify-html-literals/minify-html-literals.ts";
 
 // 快速检测代码中是否存在 html` 或 css` 模板字面量标签
 const hasTemplateLiterals = (code: string) => /\b(?:html|css)`/s.test(code);
+
+/**
+ * 把路径归一化为 realpath（解析 symlink），失败时回退原路径。
+ * 用于跨"输入路径 vs onLoad 传入路径"的稳健比较：例如在 macOS 下
+ * `/tmp` 是 `/private/tmp` 的 symlink，bun 在 onLoad 中传入的路径已被
+ * realpath 解析，但调用方传入的 entry 可能是原始路径。
+ */
+function safeRealpath(p: string): string {
+  try {
+    return realpathSync(p);
+  } catch {
+    return p;
+  }
+}
 
 /**
  * 基础插件：仅做 html/css 模板字面量压缩，用于构建独立 module 文件
@@ -54,6 +69,10 @@ export function createMainPlugin(
   return {
     name: "main-plugin",
     setup(builder) {
+      // 预先把 entry 归一化为 realpath，避免 macOS 下 `/tmp` ↔ `/private/tmp`
+      // 这类 symlink 导致 args.path 与 entry 字符串不等 → seed 注入失败。
+      const entryReal = entry ? safeRealpath(entry) : undefined;
+
       // 优先级高：先拦截 .ts 导入，检查是否属于 module
       // 注意：不能匹配 .js，否则会干扰 node_modules 中 .js 模块的解析（Bun bug）
       builder.onResolve({ filter: /\.ts([#\?].*)?$/ }, (args) => {
@@ -112,13 +131,18 @@ export function createMainPlugin(
         }
         // 仅给当前 entry 注入上游 hash 种子，让 bun 计算 entry 产物文件名时
         // 把上游 hash 纳入指纹（external 默认不计入 hash）。
-        // 用 export const 而不是注释/字符串字面量：注释会被 minify 移除、
-        // 表达式语句会被 DCE，而 entry 的 export 一定保留在产物中，从而进入
-        // bun 的内容指纹计算 → 上游变 → entry 文件名 hash 变。
-        if (entryHashSeed && entry && args.path === entry) {
-          code = `export const __biu_upstream__=${
-            JSON.stringify(entryHashSeed)
-          };\n${code}`;
+        //
+        // ⚠️ 不能用 `export const` / `globalThis.X = ...`：bun minify 会把
+        // 未读取的导出和无副作用的赋值都 DCE 掉，种子从而无法进入产物 hash 计算。
+        //
+        // 用 `/*! ... */` license-style 注释：bun minify 默认保留这类注释
+        // （其它注释会被剥离），它能稳定地保留在产物中、参与 contenthash 计算，
+        // 且没有任何运行时开销。
+        if (entryHashSeed && entryReal && args.path === entryReal) {
+          // 防御：seed 实际只含 [a-z0-9.,:|/_-]，但保险起见把 */ 转义掉
+          // （否则会提前关闭注释，破坏 JS 语法）
+          const safeSeed = entryHashSeed.replace(/\*\//g, "*\\/");
+          code = `/*! __biu_upstream__:${safeSeed} */\n${code}`;
         }
         return { contents: code, loader: "ts" };
       });

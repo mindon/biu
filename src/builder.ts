@@ -35,8 +35,12 @@ interface FileScan {
 
 const FILE_IMPORT_TS_RE =
   /(?:import|from)\s+["'](\.?\/?.*?\.(ts|js)([#\?][^"']*)?)["']/g;
+// 字符串字面量引用的资源后缀。包含 ts/js/mts/mjs 是为了识别"动态加载"
+// 模式（如 `s.src = "./a.js"`、`new Worker("./a.ts")`、`loadScript("./a.js")`），
+// 这些不会出现在 import/from 里，但其源文件改动应让引用方产物 hash 变化，
+// 否则下游产物文件名不变 → updateJsImports 不会重写 → 浏览器请求旧 hash 404。
 const FILE_STRING_REF_RE =
-  /["'`](\.{1,2}\/[^"'`\s]+?\.(?:png|jpe?g|gif|svg|webp|avif|bmp|ico|woff2?|ttf|otf|eot|mp4|webm|ogg|mp3|wav|json|css|scss|sass))["'`]/gi;
+  /["'`](\.{1,2}\/[^"'`\s]+?\.(?:png|jpe?g|gif|svg|webp|avif|bmp|ico|woff2?|ttf|otf|eot|mp4|webm|ogg|mp3|wav|json|css|scss|sass|[mc]?[jt]s))["'`]/gi;
 
 /**
  * 创建文件扫描器：统一一次读盘 + 一次正则扫描，结果缓存复用。
@@ -77,9 +81,22 @@ function createFileScanner(jsFileSet: Set<string>) {
         const before = code.slice(Math.max(0, idx - 32), idx);
         // 排除前面紧跟 import/from 的（那是模块导入，已由 imports 字段处理）
         if (/(?:import|from)\s*$/i.test(before)) continue;
-        const abs = resolve(dir, spec.replace(/[#\?].*$/, ""));
+        let abs = resolve(dir, spec.replace(/[#\?].*$/, ""));
+        // 动态加载形式：用户在源码里写 `"./a.js"`/`"./a.mjs"`，但盘上是 `.ts`/`.mts`，
+        // 回退到对应 ts 源文件，保证 a.ts 改动能被识别为 b 的资源依赖。
+        if (!existsSync(abs)) {
+          const lower = abs.toLowerCase();
+          let alt: string | null = null;
+          if (lower.endsWith(".js")) alt = `${abs.slice(0, -3)}.ts`;
+          else if (lower.endsWith(".cjs")) alt = `${abs.slice(0, -4)}.cts`;
+          else if (lower.endsWith(".mjs")) alt = `${abs.slice(0, -4)}.mts`;
+          if (alt && existsSync(alt)) {
+            abs = alt;
+          } else {
+            continue;
+          }
+        }
         if (abs === file || seen.has(abs)) continue;
-        if (!existsSync(abs)) continue;
         seen.add(abs);
         assetRefs.push(abs);
       }
@@ -295,35 +312,48 @@ async function updateJsImports(
 
           for (const [mappedSrcFile, mappedOutFile] of allMappings) {
             const relFromJs = relative(jsSrcDir, mappedSrcFile);
-            const escapedRelPath = relFromJs.replace(
-              /[.*+?^${}()|[\]\\]/g,
-              "\\$&",
-            );
-            const newCode = code.replace(
-              new RegExp(
-                `(["'\`])(?:\\.\\/)?${escapedRelPath}(["'\`])`,
-                "g",
-              ),
-              (match, q1, q2, offset) => {
-                if (
-                  offset > 5 &&
-                  /data\s*:[^"'`]*$/i.test(
-                    code.slice(Math.max(0, offset - 200), offset),
-                  )
-                ) {
-                  return match;
-                }
-                const before = code.slice(Math.max(0, offset - 50), offset);
-                if (/(?:import|from)\s*$/i.test(before)) {
-                  return match;
-                }
-                const relOutput = relative(jsOutDir, mappedOutFile);
-                return `${q1}${relOutput}${q2}`;
-              },
-            );
-            if (newCode !== code) {
-              code = newCode;
-              changed = true;
+            // 对 .ts/.mts 源文件，额外接受 .js/.mjs 形式的字符串引用
+            // （动态加载场景：用户写 `s.src="./a.js"` 而源是 `a.ts`）
+            const altRels: string[] = [relFromJs];
+            const lowerRel = relFromJs.toLowerCase();
+            if (lowerRel.endsWith(".ts")) {
+              altRels.push(`${relFromJs.slice(0, -3)}.js`);
+            } else if (lowerRel.endsWith(".mts")) {
+              altRels.push(`${relFromJs.slice(0, -4)}.mjs`);
+            } else if (lowerRel.endsWith(".cts")) {
+              altRels.push(`${relFromJs.slice(0, -4)}.cjs`);
+            }
+            for (const alt of altRels) {
+              const escapedRelPath = alt.replace(
+                /[.*+?^${}()|[\]\\]/g,
+                "\\$&",
+              );
+              const newCode = code.replace(
+                new RegExp(
+                  `(["'\`])(?:\\.\\/)?${escapedRelPath}(["'\`])`,
+                  "g",
+                ),
+                (match, q1, q2, offset) => {
+                  if (
+                    offset > 5 &&
+                    /data\s*:[^"'`]*$/i.test(
+                      code.slice(Math.max(0, offset - 200), offset),
+                    )
+                  ) {
+                    return match;
+                  }
+                  const before = code.slice(Math.max(0, offset - 50), offset);
+                  if (/(?:import|from)\s*$/i.test(before)) {
+                    return match;
+                  }
+                  const relOutput = relative(jsOutDir, mappedOutFile);
+                  return `${q1}${relOutput}${q2}`;
+                },
+              );
+              if (newCode !== code) {
+                code = newCode;
+                changed = true;
+              }
             }
           }
         }
@@ -922,7 +952,7 @@ export async function buildProject(
         /url\(\s*(?!["']?(?:data\s*:|https?:\/\/))["']?([^"')]+?)["']?\s*\)/gi,
       );
       for (const m of urlRefs) {
-        const ref = m[1].replace(/[?#].*$/, '');
+        const ref = m[1].replace(/[?#].*$/, "");
         if (!ref) continue;
         const abs = resolve(cssDir, ref);
         if (knownFiles.has(abs) || existsSync(abs)) continue;
@@ -938,9 +968,7 @@ export async function buildProject(
           : null;
         if (inStaticDirect && existsSync(inStaticDirect)) continue;
         warnings.push(
-          `  ${
-            relative(srcDir, file)
-          }: url("${ref}") → missing`,
+          `  ${relative(srcDir, file)}: url("${ref}") → missing`,
         );
       }
     }

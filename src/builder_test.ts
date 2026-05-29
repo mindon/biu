@@ -361,3 +361,116 @@ describe("buildProject — auto-inline", () => {
     expect(jsFiles.some((f) => /util[.\-]/.test(f))).toBe(false);
   });
 });
+
+// 覆盖：动态加载场景（字符串字面量 "./a.js" 而非 import）下，
+// a.ts 改动时下游 b.ts 的产物 hash 应该跟着变化、内部字符串引用应被
+// 重写为新 hash 产物名，旧 a.[oldhash].js 应被清理。
+describe("buildProject — dynamic-script reference", () => {
+  beforeEach(async () => {
+    await rm(tmpInlineSrc, { recursive: true, force: true });
+    await rm(tmpInlineOut, { recursive: true, force: true });
+    await mkdir(tmpInlineSrc, { recursive: true });
+  });
+
+  afterAll(async () => {
+    await rm(tmpInlineSrc, { recursive: true, force: true });
+    await rm(tmpInlineOut, { recursive: true, force: true });
+  });
+
+  test("string-literal './a.js' triggers hash update on downstream when a.ts changes", async () => {
+    // b.ts 通过 createElement('script') 动态加载 a.js（编译后路径），
+    // 不通过 import —— 这是常见的运行时插件加载/code-splitting 模式。
+    await Bun.write(
+      join(tmpInlineSrc, "a.ts"),
+      `export const tag = "A_V1";`,
+    );
+    await Bun.write(
+      join(tmpInlineSrc, "b.ts"),
+      `const s = document.createElement("script");\n` +
+        `s.src = "./a.js";\n` +
+        `document.head.appendChild(s);`,
+    );
+    await Bun.write(
+      join(tmpInlineSrc, "index.html"),
+      `<html><body>` +
+        `<script type="module" src="./a.ts"></script>` +
+        `<script type="module" src="./b.ts"></script>` +
+        `</body></html>`,
+    );
+
+    // 第 1 次 build
+    await buildProject(tmpInlineSrc, tmpInlineOut);
+    const files1 = await Array.fromAsync(
+      new Bun.Glob("**/*.js").scan(tmpInlineOut),
+    );
+    const a1 = files1.find((f) => /^a[.\-][0-9a-z]+\.js$/.test(f));
+    const b1 = files1.find((f) => /^b[.\-][0-9a-z]+\.js$/.test(f));
+    expect(a1).toBeDefined();
+    expect(b1).toBeDefined();
+    // b1 内部的字符串路径应已重写为带 hash 的 a 产物名
+    const b1Code = await Bun.file(join(tmpInlineOut, b1!)).text();
+    expect(b1Code).toContain(a1!);
+    expect(b1Code).not.toMatch(/["']\.\/a\.js["']/);
+
+    // 修改 a.ts，第 2 次 build
+    await Bun.write(
+      join(tmpInlineSrc, "a.ts"),
+      `export const tag = "A_V2_with_very_different_content_for_hash";`,
+    );
+    await buildProject(tmpInlineSrc, tmpInlineOut);
+    const files2 = await Array.fromAsync(
+      new Bun.Glob("**/*.js").scan(tmpInlineOut),
+    );
+    const a2 = files2.find((f) => /^a[.\-][0-9a-z]+\.js$/.test(f));
+    const b2 = files2.find((f) => /^b[.\-][0-9a-z]+\.js$/.test(f));
+    expect(a2).toBeDefined();
+    expect(b2).toBeDefined();
+
+    // a 产物 hash 必须变化
+    expect(a2).not.toBe(a1);
+    // b 产物 hash 也必须变化（动态依赖纳入了内容指纹）
+    expect(b2).not.toBe(b1);
+    // b2 内部应指向新的 a2，而不是旧的 a1
+    const b2Code = await Bun.file(join(tmpInlineOut, b2!)).text();
+    expect(b2Code).toContain(a2!);
+    expect(b2Code).not.toContain(a1!);
+
+    // 旧 a.[oldhash].js 应已被孤儿清理
+    const aFiles = files2.filter((f) => /^a[.\-][0-9a-z]+\.js$/.test(f));
+    expect(aFiles).toHaveLength(1);
+    expect(aFiles[0]).toBe(a2);
+  });
+
+  test("supports both './a.js' and './a.ts' string-literal styles", async () => {
+    await Bun.write(
+      join(tmpInlineSrc, "a.ts"),
+      `export const v = 1;`,
+    );
+    // b.ts 既有 .js 也有 .ts 形式的字面量引用
+    await Bun.write(
+      join(tmpInlineSrc, "b.ts"),
+      `const s1 = "./a.js";\nconst s2 = "./a.ts";\nconsole.log(s1, s2);`,
+    );
+    await Bun.write(
+      join(tmpInlineSrc, "index.html"),
+      `<html><body>` +
+        `<script type="module" src="./a.ts"></script>` +
+        `<script type="module" src="./b.ts"></script>` +
+        `</body></html>`,
+    );
+
+    await buildProject(tmpInlineSrc, tmpInlineOut);
+    const files = await Array.fromAsync(
+      new Bun.Glob("**/*.js").scan(tmpInlineOut),
+    );
+    const a = files.find((f) => /^a[.\-][0-9a-z]+\.js$/.test(f))!;
+    const b = files.find((f) => /^b[.\-][0-9a-z]+\.js$/.test(f))!;
+    const bCode = await Bun.file(join(tmpInlineOut, b)).text();
+    // 两种形式都应被重写为带 hash 的产物名
+    expect(bCode).not.toMatch(/["']\.\/a\.js["']/);
+    expect(bCode).not.toMatch(/["']\.\/a\.ts["']/);
+    // 至少出现两次新产物名（s1、s2 都应替换）
+    const occ = bCode.split(a).length - 1;
+    expect(occ).toBeGreaterThanOrEqual(2);
+  });
+});
