@@ -80,10 +80,10 @@ export function parseArgs(): CliArgs {
       case "--post-build":
         postBuildScript = args[++i];
         break;
-      case "--apis":
+      case "--backend-dir":
         backendDir = args[++i];
         break;
-      case "--api-style":
+      case "--backend-style":
         backendStyle = args[++i] ?? "nextjs";
         break;
       case "--serve": {
