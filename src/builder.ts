@@ -14,6 +14,7 @@ import { processAssetFiles } from "./assets.ts";
 import { createBasePlugin, createMainPlugin } from "./plugins.ts";
 import { processHtml } from "./html.ts";
 import { collectImportMapSpecifiers } from "./importmaps.ts";
+import { rewriteCdnInOutputs, runCdnPipeline } from "./cdn.ts";
 
 /**
  * 单个 JS/TS 源文件的扫描结果。整次构建中每个文件只扫描一次，
@@ -490,6 +491,9 @@ export async function buildProject(
   depends?: DependsMode,
   forceWrite = false,
   staticDir?: string | null,
+  cdnCacheDir?: string | null,
+  offline = false,
+  cdnProxyFallback = false,
 ) {
   const startTime = performance.now();
   // 清空跨构建的 asset hash 缓存（避免 watch / dev 模式下读到陈旧 hash）
@@ -910,6 +914,44 @@ export async function buildProject(
     sourceToOutputAsset,
     forceWrite,
   );
+
+  // ── CDN 缓存阶段（可选） ──
+  // 收集源码中引用的所有 https:// CDN URL（HTML / CSS / JS / TS / importmap），
+  // 递归下载到本地缓存目录；构建产物中所有字面量 CDN URL 改写为
+  // /cdn/<host>/<path>，并向 HTML <head> 注入运行时 shim 处理动态加载。
+  let cdnSummary:
+    | { discovered: number; cached: number; copied: number }
+    | null = null;
+  if (cdnCacheDir) {
+    try {
+      const pipe = await runCdnPipeline(
+        htmlContents,
+        styleFiles,
+        jsFiles,
+        { cacheDir: cdnCacheDir, outDir, offline },
+      );
+      const rew = await rewriteCdnInOutputs(
+        outDir,
+        pipe.manifest,
+        cdnProxyFallback,
+      );
+      cdnSummary = {
+        discovered: pipe.discovered,
+        cached: pipe.cached,
+        copied: pipe.copied,
+      };
+      if (pipe.discovered > 0) {
+        console.log(
+          `\n☁️  CDN cache: discovered=${pipe.discovered}, cached=${pipe.cached}, ` +
+            `copied=${pipe.copied}, rewrote html=${rew.html} css=${rew.css} js=${rew.js}` +
+            (offline ? " (offline)" : ""),
+        );
+      }
+    } catch (err) {
+      console.warn(`⚠️  CDN cache phase error: ${(err as Error).message}`);
+    }
+  }
+  void cdnSummary;
 
   // ── 检查引用的资源路径是否存在 ──
   // 收集 src/ 中所有文件引用的资源路径（非 data:/http:/https:），

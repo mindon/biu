@@ -24,14 +24,6 @@
   });
   const assets: Array<HTMLElement> = [imaps];
 
-  if (q.has("d3")) {
-    assets.push(g("script", {
-      src:
-        "https://tefs-static-cdn-1300241787.file.myqcloud.com/share/d3/d3.v7.min.js",
-      crossOrigin: "anonymous",
-    }));
-  }
-
   if (q.has("bootstrap")) {
     assets.push(g("link", {
       rel: "stylesheet",

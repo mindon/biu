@@ -30,6 +30,10 @@ export interface CliArgs {
   usage?: string;
   backendDir?: string;
   backendStyle?: string;
+  /** When set, enable CDN caching to this absolute directory. */
+  cdnCacheDir?: string | null;
+  /** When true, never hit network — only serve from cache. */
+  offline?: boolean;
 }
 
 /** 解析命令行参数 */
@@ -53,6 +57,8 @@ export function parseArgs(): CliArgs {
   let postBuildScript: string | undefined;
   let depends: DependsMode = { kind: "auto" };
   let forceWrite = false;
+  let cdnCacheDir: string | null = null;
+  let offline = false;
 
   const positional: string[] = [];
   for (let i = 0; i < args.length; i++) {
@@ -64,6 +70,29 @@ export function parseArgs(): CliArgs {
         ? arg.slice(arg.indexOf("=") + 1)
         : args[++i] ?? "auto";
       depends = parseDependsValue(val);
+      continue;
+    }
+
+    // 处理 --cdn-cache / --cdn-cache=<dir> / --cdn-cache <dir>
+    if (arg === "--cdn-cache" || arg.startsWith("--cdn-cache=")) {
+      let val: string | undefined;
+      if (arg.includes("=")) {
+        val = arg.slice(arg.indexOf("=") + 1);
+      } else {
+        const next = args[i + 1];
+        if (next && !next.startsWith("-")) {
+          val = next;
+          i++;
+        }
+      }
+      cdnCacheDir = val && val.length > 0 ? val : ".biu-cache/cdn";
+      continue;
+    }
+
+    if (arg === "--offline") {
+      offline = true;
+      // --offline implies --cdn-cache (with default dir) if not set yet
+      if (!cdnCacheDir) cdnCacheDir = ".biu-cache/cdn";
       continue;
     }
 
@@ -120,6 +149,8 @@ export function parseArgs(): CliArgs {
     forceWrite,
     backendDir,
     backendStyle,
+    cdnCacheDir: cdnCacheDir ? resolve(cdnCacheDir) : null,
+    offline,
   };
 }
 

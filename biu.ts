@@ -31,6 +31,8 @@ async function run() {
     forceWrite,
     backendDir,
     backendStyle,
+    cdnCacheDir,
+    offline,
   } = parseArgs();
 
   if (version) {
@@ -85,7 +87,17 @@ async function run() {
       await copyStaticDir(staticDir, outDir, cwd);
     }
     if (staticMode === "static") return;
-    await buildProject(srcDir, outDir, depends, forceWrite, staticDir);
+    await buildProject(
+      srcDir,
+      outDir,
+      depends,
+      forceWrite,
+      staticDir,
+      cdnCacheDir,
+      !!offline,
+      // proxy fallback only when dev server is running
+      !!servePort,
+    );
     await postBuild(outDir, postBuildScript);
   }
 
@@ -96,7 +108,15 @@ async function run() {
     startWatcher(srcDir, staticDir, cwd, fullBuild);
 
     if (servePort) {
-      startDevServer(outDir, servePort, cwd, backendDir, backendStyle);
+      startDevServer(
+        outDir,
+        servePort,
+        cwd,
+        backendDir,
+        backendStyle,
+        cdnCacheDir,
+        !!offline,
+      );
     }
   }
 }

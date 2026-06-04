@@ -30,6 +30,12 @@ deployment.
   modes for npm dependencies (`--depends`).
 - **Post-build Scripts**: Run custom `.sh`/`.ts`/`.js` scripts after each build.
 - **Self-compile**: Build a standalone binary with a single command.
+- **CDN Caching (offline)**: `--cdn-cache` recursively downloads every CDN URL
+  referenced from HTML/CSS/JS/importmap (incl. dynamic `script.src` loads) to a
+  local fs cache, rewrites build outputs to load from `<outDir>/cdn/`, and
+  injects a runtime shim that intercepts dynamic `createElement` / `fetch` / XHR
+  cross-origin loads. Use `--offline` to fail loudly on cache misses. In
+  `--serve` mode the dev server exposes a lazy `/_cdn/<host>/<path>` proxy.
 - **Fast**: Built on the lightning-fast Bun runtime.
 
 ## Project Structure

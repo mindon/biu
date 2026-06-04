@@ -1,7 +1,8 @@
 // biu — watch mode & dev server
 
 import { existsSync, lstatSync, statSync, watch } from "node:fs";
-import { basename, extname, join, relative, resolve } from "node:path";
+import { mkdir } from "node:fs/promises";
+import { basename, dirname, extname, join, relative, resolve } from "node:path";
 import { excludedRules } from "./constants.ts";
 
 function ignored(filename?: string): boolean {
@@ -141,6 +142,8 @@ export function startDevServer(
   cwd: string,
   backendDir: string = "",
   backendStyle: string = "nextjs",
+  cdnCacheDir?: string | null,
+  offline = false,
 ) {
   let router: Bun.FileSystemRouter | undefined;
   let routerVersion = 0;
@@ -173,6 +176,47 @@ export function startDevServer(
   Bun.serve({
     port,
     async fetch(req) {
+      // ---- /_cdn/<host>/<path> → lazy CDN proxy (offline cache) ----
+      const url0 = new URL(req.url);
+      if (cdnCacheDir && url0.pathname.startsWith("/_cdn/")) {
+        const rest = decodeURIComponent(url0.pathname.slice("/_cdn/".length));
+        const localPath = join(cdnCacheDir, rest);
+        const localFile = Bun.file(localPath);
+        if (await localFile.exists()) {
+          return new Response(localFile);
+        }
+        if (offline) {
+          return new Response("offline + uncached", { status: 504 });
+        }
+        const upstream = "https://" + rest + (url0.search || "");
+        try {
+          const res = await fetch(upstream, {
+            redirect: "follow",
+            headers: {
+              "User-Agent":
+                "Mozilla/5.0 (compatible; biu/1) AppleWebKit/537.36 Chrome/120 Safari/537.36",
+            },
+          });
+          if (!res.ok) {
+            return new Response(`upstream ${res.status}`, {
+              status: res.status,
+            });
+          }
+          const buf = await res.arrayBuffer();
+          await mkdir(dirname(localPath), { recursive: true });
+          await Bun.write(localPath, buf);
+          const headers = new Headers();
+          const ct = res.headers.get("content-type");
+          if (ct) headers.set("content-type", ct);
+          return new Response(buf, { headers });
+        } catch (err) {
+          return new Response(
+            `proxy error: ${(err as Error).message}`,
+            { status: 502 },
+          );
+        }
+      }
+
       // ---- API 路由 ----
       const matched = router?.match(req);
       if (matched) {
@@ -234,4 +278,10 @@ export function startDevServer(
   console.log(
     `🌐 Serving ${relative(cwd, outDir)} at http://localhost:${port}`,
   );
+  if (cdnCacheDir) {
+    console.log(
+      `☁️  CDN proxy: /_cdn/<host>/<path> → ${relative(cwd, cdnCacheDir)}` +
+        (offline ? " (offline)" : ""),
+    );
+  }
 }
