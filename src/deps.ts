@@ -4,6 +4,7 @@ import { existsSync } from "node:fs";
 import { stat } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import type { DependsMode } from "./cli.ts";
+import { type ImportMapSpecifiers, isImportMapMapped } from "./importmaps.ts";
 
 const CACHE_FILE = ".biu-deps";
 
@@ -397,6 +398,7 @@ export async function autoInstallDeps(
   jsFiles: string[],
   srcDir: string,
   mode: DependsMode = { kind: "auto" },
+  importMapSpecifiers?: ImportMapSpecifiers,
 ): Promise<string[]> {
   const pkgRoot = findPackageRoot(srcDir);
   const installDir = pkgRoot || dirname(srcDir);
@@ -408,6 +410,8 @@ export async function autoInstallDeps(
       const code = await Bun.file(file).text();
       const dir = dirname(file);
       for (const spec of extractImportSpecs(code)) {
+        // import map 接管的 bare specifier 由浏览器解析，不能当 npm 包安装。
+        if (isImportMapMapped(spec, importMapSpecifiers)) continue;
         // extractImportSpecs 已过滤掉相对路径/绝对路径/URL/node:|bun:
         // 但 spec 仍可能携带 ?query / #hash 后缀，需先剥离再做本地路径判断
         const cleanSpec = stripSpecSuffix(spec);

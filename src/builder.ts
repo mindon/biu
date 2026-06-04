@@ -11,8 +11,9 @@ import { autoInstallDeps } from "./deps.ts";
 import type { DependsMode } from "./cli.ts";
 import { processStyleFiles } from "./styles.ts";
 import { processAssetFiles } from "./assets.ts";
-import { basePlugin, createMainPlugin } from "./plugins.ts";
+import { createBasePlugin, createMainPlugin } from "./plugins.ts";
 import { processHtml } from "./html.ts";
+import { collectImportMapSpecifiers } from "./importmaps.ts";
 
 /**
  * 单个 JS/TS 源文件的扫描结果。整次构建中每个文件只扫描一次，
@@ -507,19 +508,24 @@ export async function buildProject(
     return !MANAGED_EXTS.has(ext) && ASSET_EXTS.has(ext);
   });
 
-  // 自动检测并安装缺失的 npm 依赖
-  await autoInstallDeps(jsFiles, srcDir, depends);
-
-  // 从 HTML 入口开始分析依赖
-  let initialEntries: string[] = [];
-  const initialModules: string[] = [];
-
   const htmlContents = await Promise.all(
     htmlFiles.map(async (htmlFile) => ({
       file: htmlFile,
       content: await Bun.file(htmlFile).text(),
     })),
   );
+  const importMapSpecifiers = await collectImportMapSpecifiers(
+    htmlContents.map((h) => h.content),
+    jsFiles,
+  );
+
+  // 自动检测并安装缺失的 npm 依赖；import map 已接管的 specifier 跳过。
+  await autoInstallDeps(jsFiles, srcDir, depends, importMapSpecifiers);
+
+  // 从 HTML 入口开始分析依赖
+  let initialEntries: string[] = [];
+  const initialModules: string[] = [];
+
   // 拼接所有 HTML 原始内容，用于 basename 出现检测
   const htmlRawContents = htmlContents.map((h) => h.content).join("\n");
 
@@ -733,8 +739,14 @@ export async function buildProject(
         : undefined;
 
       const plugin = otherModules.size > 0
-        ? createMainPlugin(otherModules, moduleOutputs, file, entryHashSeed)
-        : basePlugin;
+        ? createMainPlugin(
+          otherModules,
+          moduleOutputs,
+          file,
+          entryHashSeed,
+          importMapSpecifiers,
+        )
+        : createBasePlugin(importMapSpecifiers);
 
       const moduleOutDir = join(outDir, dirname(file.replace(srcDir, "")));
 

@@ -6,7 +6,7 @@
       "name": "bun-minifier",
       "dependencies": {
         "clean-css": "^5.3.3",
-        "html-minifier-next": "^6.2.7",
+        "html-minifier-next": "^6.2.8",
         "html-minifier-terser": "^7.2.0",
         "magic-string": "^0.30.21",
         "sass": "^1.100.0",

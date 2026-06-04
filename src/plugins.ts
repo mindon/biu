@@ -4,9 +4,32 @@ import type { Plugin } from "bun";
 import { realpathSync } from "node:fs";
 import { dirname, relative, resolve } from "node:path";
 import { minifyHTMLLiterals } from "../plugins/minify-html-literals/minify-html-literals.ts";
+import { type ImportMapSpecifiers, isImportMapMapped } from "./importmaps.ts";
 
 // 快速检测代码中是否存在 html` 或 css` 模板字面量标签
 const hasTemplateLiterals = (code: string) => /\b(?:html|css)`/s.test(code);
+
+function isBareSpecifier(spec: string): boolean {
+  return !spec.startsWith(".") && !spec.startsWith("/") &&
+    !/^[a-z][a-z0-9+.-]*:/i.test(spec);
+}
+
+function setupImportMapExternals(
+  builder: Parameters<Plugin["setup"]>[0],
+  importMapSpecifiers?: ImportMapSpecifiers,
+): void {
+  if (!importMapSpecifiers || importMapSpecifiers.size === 0) return;
+  builder.onResolve({ filter: /.*/ }, (args) => {
+    if (
+      isBareSpecifier(args.path) &&
+      isImportMapMapped(args.path, importMapSpecifiers)
+    ) {
+      // 由 import map 在浏览器运行时解析，Bun 不应解析、安装或 bundle。
+      return { path: args.path, external: true };
+    }
+    return undefined;
+  });
+}
 
 /**
  * 把路径归一化为 realpath（解析 symlink），失败时回退原路径。
@@ -25,24 +48,31 @@ function safeRealpath(p: string): string {
 /**
  * 基础插件：仅做 html/css 模板字面量压缩，用于构建独立 module 文件
  */
-export const basePlugin: Plugin = {
-  name: "base-plugin",
-  setup(builder) {
-    builder.onLoad({ filter: /\.(ts|js)$/ }, async (args) => {
-      let code = await Bun.file(args.path).text();
-      // 去掉代码中的 ?# 后缀，让 Bun 能正确解析路径
-      code = code.replace(
-        /((?:import|from)\s+["'][^"']*?)[#\?][^"']*(["'])/g,
-        "$1$2",
-      );
-      if (hasTemplateLiterals(code)) {
-        const result: any = await minifyHTMLLiterals(code);
-        if (result) code = result.code;
-      }
-      return { contents: code, loader: "ts" };
-    });
-  },
-};
+export function createBasePlugin(
+  importMapSpecifiers?: ImportMapSpecifiers,
+): Plugin {
+  return {
+    name: "base-plugin",
+    setup(builder) {
+      setupImportMapExternals(builder, importMapSpecifiers);
+      builder.onLoad({ filter: /\.(ts|js)$/ }, async (args) => {
+        let code = await Bun.file(args.path).text();
+        // 去掉代码中的 ?# 后缀，让 Bun 能正确解析路径
+        code = code.replace(
+          /((?:import|from)\s+["'][^"']*?)[#\?][^"']*(["'])/g,
+          "$1$2",
+        );
+        if (hasTemplateLiterals(code)) {
+          const result: any = await minifyHTMLLiterals(code);
+          if (result) code = result.code;
+        }
+        return { contents: code, loader: "ts" };
+      });
+    },
+  };
+}
+
+export const basePlugin: Plugin = createBasePlugin();
 
 /**
  * 主入口插件：在 onResolve 阶段拦截非 ?? 导入并标记为 external
@@ -65,10 +95,12 @@ export function createMainPlugin(
   moduleOutputs?: Map<string, string>,
   entry?: string,
   entryHashSeed?: string,
+  importMapSpecifiers?: ImportMapSpecifiers,
 ): Plugin {
   return {
     name: "main-plugin",
     setup(builder) {
+      setupImportMapExternals(builder, importMapSpecifiers);
       // 预先把 entry 归一化为 realpath，避免 macOS 下 `/tmp` ↔ `/private/tmp`
       // 这类 symlink 导致 args.path 与 entry 字符串不等 → seed 注入失败。
       const entryReal = entry ? safeRealpath(entry) : undefined;

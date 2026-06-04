@@ -474,3 +474,81 @@ describe("buildProject — dynamic-script reference", () => {
     expect(occ).toBeGreaterThanOrEqual(2);
   });
 });
+
+describe("buildProject — import maps", () => {
+  beforeEach(async () => {
+    await rm(tmpInlineSrc, { recursive: true, force: true });
+    await rm(tmpInlineOut, { recursive: true, force: true });
+    await mkdir(tmpInlineSrc, { recursive: true });
+    await Bun.write(join(tmpInlineSrc, "package.json"), "{}");
+  });
+
+  afterAll(async () => {
+    await rm(tmpInlineSrc, { recursive: true, force: true });
+    await rm(tmpInlineOut, { recursive: true, force: true });
+  });
+
+  test("HTML importmap dependencies are not installed or bundled", async () => {
+    await Bun.write(
+      join(tmpInlineSrc, "index.html"),
+      `<html><head>
+        <script type="importmap">
+        { "imports": { "cdn-pkg": "https://cdn.example.com/cdn-pkg.js" } }
+        </script>
+      </head><body><script type="module" src="./app.ts"></script></body></html>`,
+    );
+    await Bun.write(
+      join(tmpInlineSrc, "app.ts"),
+      `import { value } from "cdn-pkg";\nconsole.log(value);`,
+    );
+
+    await buildProject(tmpInlineSrc, tmpInlineOut, {
+      kind: "txt",
+      file: "deps.txt",
+    });
+
+    expect(existsSync(join(tmpInlineSrc, "deps.txt"))).toBe(false);
+    const jsFiles = await Array.fromAsync(
+      new Bun.Glob("**/*.js").scan(tmpInlineOut),
+    );
+    const app = jsFiles.find((f) => /^app[.\-][0-9a-z]+\.js$/.test(f))!;
+    const code = await Bun.file(join(tmpInlineOut, app)).text();
+    expect(code).toContain("cdn-pkg");
+    expect(code).toMatch(/from\s*["']cdn-pkg["']/);
+  });
+
+  test("dynamic importmap dependencies are not installed or bundled", async () => {
+    await Bun.write(
+      join(tmpInlineSrc, "index.html"),
+      `<html><body>
+        <script type="module" src="./importmap.ts"></script>
+        <script type="module" src="./app.ts"></script>
+      </body></html>`,
+    );
+    await Bun.write(
+      join(tmpInlineSrc, "importmap.ts"),
+      `const s = document.createElement("script");\n` +
+        `s.type = "importmap";\n` +
+        `s.textContent = JSON.stringify({ imports: { "dyn-pkg/": "https://cdn.example.com/dyn/" } });\n` +
+        `document.head.appendChild(s);`,
+    );
+    await Bun.write(
+      join(tmpInlineSrc, "app.ts"),
+      `import { value } from "dyn-pkg/sub";\nconsole.log(value);`,
+    );
+
+    await buildProject(tmpInlineSrc, tmpInlineOut, {
+      kind: "txt",
+      file: "deps.txt",
+    });
+
+    expect(existsSync(join(tmpInlineSrc, "deps.txt"))).toBe(false);
+    const jsFiles = await Array.fromAsync(
+      new Bun.Glob("**/*.js").scan(tmpInlineOut),
+    );
+    const app = jsFiles.find((f) => /^app[.\-][0-9a-z]+\.js$/.test(f))!;
+    const code = await Bun.file(join(tmpInlineOut, app)).text();
+    expect(code).toContain("dyn-pkg/sub");
+    expect(code).toMatch(/from\s*["']dyn-pkg\/sub["']/);
+  });
+});

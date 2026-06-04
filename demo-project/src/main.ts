@@ -4,3 +4,6 @@ console.log(greeting);
 
 import { TIMESTAMP } from "./hey/world.ts";
 console.log(TIMESTAMP);
+
+import { faker } from "@faker-js/faker@v7.1.0";
+console.log(faker);

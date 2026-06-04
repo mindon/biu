@@ -1,8 +1,18 @@
 <html>
+  <head>
+    <script type="importmap">
+    {
+      "imports": {
+        "@faker-js/faker@v7.1.0": "https://cdn.skypack.dev/@faker-js/faker@v7.1.0"
+      }
+    }
+    </script>
+  </head>
   <body>
     <script type="module">
+      import { faker } from "@faker-js/faker@v7.1.0";
       import { test } from "./test.ts?query";
-      console.log(test);
+      console.log(test, faker);
     </script>
   </body>
 </html>

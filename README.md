@@ -97,7 +97,8 @@ resulting binary is fully standalone.
 
 Run the `biu` binary or use `bun run` directly.
 
-_Note: if there's a **./backend** directory, it will be used as [Next.js](https://nextjs.org) style backend._
+_Note: if there's a **./backend** directory, it will be used as
+[Next.js](https://nextjs.org) style backend._
 
 ### Command Syntax
 
