@@ -348,7 +348,17 @@ async function updateJsImports(
                   if (/(?:import|from)\s*$/i.test(before)) {
                     return match;
                   }
-                  const relOutput = relative(jsOutDir, mappedOutFile);
+                  let relOutput = relative(jsOutDir, mappedOutFile);
+                  // 同目录下 relative() 返回裸文件名（如 "worker.xxx.js"）。
+                  // 对于 `new Worker("...")` / `import("...")` / 动态 src 赋值，
+                  // 浏览器要求 URL 以 ./ ../ / http(s): 开头才稳妥（worker
+                  // 规范尤其严格），裸文件名在某些环境下会被当成 bare specifier
+                  // 解析失败。统一补上 "./" 前缀。
+                  if (
+                    !relOutput.startsWith(".") && !relOutput.startsWith("/")
+                  ) {
+                    relOutput = `./${relOutput}`;
+                  }
                   return `${q1}${relOutput}${q2}`;
                 },
               );
@@ -553,6 +563,22 @@ export async function buildProject(
   // 跨 resolveDependencies / moduleDeps BFS / asset-ref 收集 三阶段复用。
   const jsFileSet = new Set(jsFiles);
   const scanner = createFileScanner(jsFileSet);
+
+  // 动态加载场景：源码里通过字符串字面量引用 .ts/.js 的文件（如
+  //   `new Worker("./worker.ts")`、`s.src = "./a.js"`、`import("./b.ts")`）
+  // 不会出现在 import/from 中，需要把被引用的 JS/TS 文件作为独立 module entry
+  // 构建（单独产物 + 带 hash 的文件名），否则浏览器会请求裸 .ts，404/MIME 失败。
+  // 字符串路径改写到带 hash 的 .js 产物由 updateJsImports 的 (b) 段完成。
+  {
+    const jsScans = await Promise.all(jsFiles.map((f) => scanner.get(f)));
+    for (const s of jsScans) {
+      for (const ref of s.assetRefs) {
+        if (jsFileSet.has(ref) && !initialModules.includes(ref)) {
+          initialModules.push(ref);
+        }
+      }
+    }
+  }
 
   const { entrypoints, moduleEntries, extras } = await resolveDependencies(
     initialEntries,
