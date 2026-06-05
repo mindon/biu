@@ -26,16 +26,23 @@ deployment.
 - **Static Directory**: Copy unprocessed static assets directly to the output.
 - **Watch Mode**: Live rebuilds on file changes with debounce.
 - **Dev Server**: Built-in static file server with SPA fallback.
+- **Backend (API Routes)**: If a `./backend` directory exists, biu mounts it as
+  a [Next.js](https://nextjs.org)-style file-system router (powered by
+  `Bun.FileSystemRouter`). Each `.ts`/`.js` file under it becomes a route, and
+  named exports `GET`/`POST`/`PUT`/`DELETE`/... (or a `default` handler) serve
+  matching HTTP methods. Routes are hot-reloaded on file changes — no restart.
+- **CDN Caching (offline-ready)**: `--cdn-cache` recursively downloads every
+  CDN URL referenced from HTML / CSS / JS / TS / `<script type="importmap">` to
+  a local fs cache, rewrites build outputs to load them from `<outDir>/cdn/`,
+  and injects a runtime shim that intercepts dynamic
+  `document.createElement('script'|'link')` / `fetch` / `XHR` cross-origin
+  loads. `--offline` fails loud on cache misses; in `--serve` mode the dev
+  server exposes a lazy `/_cdn/<host>/<path>` proxy that fills the cache on
+  demand.
 - **Dependency Management**: Auto-install, interactive confirm, or record-only
   modes for npm dependencies (`--depends`).
 - **Post-build Scripts**: Run custom `.sh`/`.ts`/`.js` scripts after each build.
 - **Self-compile**: Build a standalone binary with a single command.
-- **CDN Caching (offline)**: `--cdn-cache` recursively downloads every CDN URL
-  referenced from HTML/CSS/JS/importmap (incl. dynamic `script.src` loads) to a
-  local fs cache, rewrites build outputs to load from `<outDir>/cdn/`, and
-  injects a runtime shim that intercepts dynamic `createElement` / `fetch` / XHR
-  cross-origin loads. Use `--offline` to fail loudly on cache misses. In
-  `--serve` mode the dev server exposes a lazy `/_cdn/<host>/<path>` proxy.
 - **Fast**: Built on the lightning-fast Bun runtime.
 
 ## Project Structure
@@ -51,9 +58,12 @@ src/
 ├── assets.ts                   ← Static asset processing & copying
 ├── plugins.ts                  ← Bun build plugins (base + main)
 ├── html.ts                     ← HTML processing & minification
+├── importmaps.ts               ← <script type="importmap"> handling
+├── cdn.ts                      ← CDN URL extraction, fs cache, rewrite pipeline
+├── cdn-shim.ts                 ← Runtime shim injected into HTML for dynamic loads
 ├── builder.ts                  ← Core build logic (deps, modules, path rewriting)
 ├── post-build.ts               ← Post-build script execution
-├── server.ts                   ← Watch mode & dev server
+├── server.ts                   ← Watch mode, dev server, backend router, CDN proxy
 ├── *_test.ts                   ← Test files for each module
 plugins/
 └── minify-html-literals/       ← HTML template literal minifier (vendored)
@@ -62,20 +72,23 @@ demo-project/                   ← Example project for testing
 
 ### Module Dependencies (bottom-up)
 
-| Module       | Responsibility     | Dependencies                                          |
-| ------------ | ------------------ | ----------------------------------------------------- |
-| `constants`  | Constants & config | —                                                     |
-| `utils`      | Base utilities     | —                                                     |
-| `cli`        | Argument parsing   | constants                                             |
-| `styles`     | CSS processing     | utils                                                 |
-| `html`       | HTML processing    | styles                                                |
-| `assets`     | Asset processing   | utils                                                 |
-| `plugins`    | Build plugins      | minify-html-literals                                  |
-| `post-build` | Post-build scripts | —                                                     |
-| `server`     | Watch / Serve      | constants                                             |
-| `deps`       | Dependency mgmt    | cli                                                   |
-| `builder`    | Core build         | utils, constants, styles, assets, plugins, html, deps |
-| **`biu.ts`** | **Entry point**    | cli, constants, builder, assets, post-build, server   |
+| Module        | Responsibility           | Dependencies                                                |
+| ------------- | ------------------------ | ----------------------------------------------------------- |
+| `constants`   | Constants & config       | —                                                           |
+| `utils`       | Base utilities           | —                                                           |
+| `cli`        | Argument parsing         | constants                                                   |
+| `styles`      | CSS processing           | utils                                                       |
+| `html`        | HTML processing          | styles                                                      |
+| `assets`      | Asset processing         | utils                                                       |
+| `plugins`     | Build plugins            | minify-html-literals                                        |
+| `post-build`  | Post-build scripts       | —                                                           |
+| `importmaps`  | Importmap handling       | utils                                                       |
+| `cdn-shim`    | Runtime CDN shim source  | —                                                           |
+| `cdn`         | CDN cache pipeline       | utils, cdn-shim                                             |
+| `server`      | Watch / Serve / Backend  | constants, utils                                            |
+| `deps`        | Dependency mgmt          | cli                                                         |
+| `builder`     | Core build               | utils, constants, styles, assets, plugins, html, deps, cdn  |
+| **`biu.ts`**  | **Entry point**          | cli, constants, builder, assets, post-build, server, cdn    |
 
 ## Installation & Compilation
 
@@ -88,13 +101,13 @@ without cloning the repo:
 **macOS / Linux / WSL:**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/mindon/biu/main/install.sh | bash
+curl -fsSL https://mindon.dev/biu/install | bash
 ```
 
 **Windows (PowerShell):**
 
 ```powershell
-powershell -c "irm https://raw.githubusercontent.com/mindon/biu/main/install.ps1 | iex"
+powershell -c "irm https://mindon.dev/biu/install.ps1 | iex"
 ```
 
 The installers download `biu-<target>.zip` from GitHub Releases, extract the
@@ -152,30 +165,47 @@ resulting binary is fully standalone.
 
 Run the `biu` binary or use `bun run` directly.
 
-_Note: if there's a **./backend** directory, it will be used as
-[Next.js](https://nextjs.org) style backend._
+> If a `./backend` directory exists, biu treats it as a Next.js-style
+> file-system router (see [Backend (API Routes)](#backend-api-routes)).
 
 ### Command Syntax
 
 ```bash
-biu [src-dir] [out-dir] [--watch] [--static dir] [--serve port] [--depends mode] [--post-build file] [--build outfile]
+biu [src-dir] [out-dir] [--watch] [--static dir] [--serve port] \
+    [--depends mode] [--post-build file] [--build outfile] [--force] \
+    [--backend-dir dir] [--backend-style nextjs] \
+    [--cdn-cache [dir]] [--offline]
 ```
 
 - `src-dir`: The source directory (default: `./src`).
 - `out-dir`: The output directory (default: `./dist`).
 - `--watch`: Enable watch mode — rebuild on file changes.
 - `--static dir`: Specify a static assets directory to copy as-is into the
-  output (default: `./static`). If the directory exists, its contents are copied
-  before each build. In watch mode the static directory is also monitored.
+  output (default: `./static`). If the directory exists, its contents are
+  copied before each build. In watch mode the static directory is also
+  monitored.
 - `--depends [mode]`: Control how missing npm dependencies are handled (default:
   `auto`). See [Dependency Management](#dependency-management) for details.
 - `--post-build <file>`: Module `.ts`/`.js` or shell script to run after each
   build. Receives the output directory as the first argument (`$1`).
 - `--serve [port]`: Start a static file server for the output directory on the
   given port (default: `3000` when no port is specified). Implies `--watch`.
+  Also enables the backend router (if `./backend` exists) and the CDN proxy
+  (if `--cdn-cache` is set).
 - `--build [outfile]`: Self-compile `biu.ts` into a standalone binary at the
   given path (default: `./biu`). Uses `bun build --compile --minify` under the
   hood.
+- `--force`: Force rewrite output files even if their content hash matches an
+  existing file.
+- `--backend-dir <dir>`: Override the API routes directory (default:
+  `./backend`). Only consulted when `--serve` is active.
+- `--backend-style <style>`: File-system router style passed to
+  `Bun.FileSystemRouter` (default: `nextjs`).
+- `--cdn-cache [dir]`: Cache all referenced CDN URLs into a local directory
+  (default: `.biu-cache/cdn`) and rewrite outputs to load them from
+  `<outDir>/cdn/`. See [CDN Caching](#cdn-caching).
+- `--offline`: Never hit the network — only serve from cache; warn on misses.
+  Implies `--cdn-cache`.
 - `-v, --version`: Show version info.
 - `-h, --help`: Show help / usage.
 
@@ -214,6 +244,22 @@ biu --static ./public --serve 4000
 
 ```bash
 biu --post-build ./scripts/deploy.sh
+```
+
+**Backend API + static dev server:**
+
+```bash
+# Drop a route in ./backend/hello.ts, then:
+biu --serve 3000
+# → GET http://localhost:3000/hello
+```
+
+**Cache CDN deps for offline use:**
+
+```bash
+biu --cdn-cache             # fetch + cache, rewrite outputs to ./dist/cdn/
+biu --cdn-cache --offline   # build with zero network egress
+biu --serve --cdn-cache     # dev server with lazy /_cdn/<host>/<path> proxy
 ```
 
 **Compile to binary and run:**
@@ -328,6 +374,141 @@ the output directory:
 - Requests without a file extension fall back to `/index.html` (SPA-friendly).
 - Proper MIME types are automatically detected by Bun.
 - `--serve` automatically enables watch mode, so changes trigger a rebuild.
+- API routes from `./backend` (or `--backend-dir`) are mounted in front of
+  static files (see [Backend (API Routes)](#backend-api-routes)).
+- When `--cdn-cache` is active, a lazy proxy at `/_cdn/<host>/<path>`
+  populates the cache on demand (see [CDN Caching](#cdn-caching)).
+
+## Backend (API Routes)
+
+If a `./backend` directory exists (or `--backend-dir <dir>` is provided), biu
+enables an integrated API layer powered by `Bun.FileSystemRouter`. It only
+runs when `--serve` is active — pure static builds are unaffected.
+
+**File layout:**
+
+```
+backend/
+├── index.ts             → GET  /
+├── hello.ts             → GET  /hello
+├── users/
+│   ├── index.ts         → GET  /users
+│   └── [id].ts          → GET  /users/:id   (params.id)
+└── api/
+    └── search.ts        → GET  /api/search  (?q=...)
+```
+
+**Handler shape:** each route file may export named methods (`GET`, `POST`,
+`PUT`, `PATCH`, `DELETE`, ...) and/or a `default` function. Named methods
+take precedence; `default` is the catch-all fallback. Anything else returns
+`405 Method Not Allowed`.
+
+```typescript
+// backend/users/[id].ts
+import type { RouteContext } from "biu/server";
+
+export async function GET(req: Request, ctx: RouteContext) {
+  return { id: ctx.params.id, name: "Ada" };
+}
+
+export async function DELETE(_req: Request, ctx: RouteContext) {
+  return new Response(null, { status: 204 });
+}
+```
+
+**Return value coercion:** handlers may return any of:
+
+| Returned value                              | Response                                |
+| ------------------------------------------- | --------------------------------------- |
+| `Response`                                  | passed through                          |
+| `string`                                    | `text/plain; charset=utf-8`             |
+| `null` / `undefined`                        | `204 No Content`                        |
+| `ArrayBuffer` / `Uint8Array` / `Blob` / `ReadableStream` | binary stream                |
+| anything else (object/array/number/...)     | JSON (`application/json; charset=utf-8`)|
+
+Errors thrown inside a handler are logged and surface as `500`.
+
+**`RouteContext`:**
+
+```typescript
+interface RouteContext {
+  params: Record<string, string>;   // dynamic segments, e.g. /users/[id]
+  query: Record<string, string>;    // parsed query string
+  pathname: string;                 // matched route pathname
+}
+```
+
+**Hot reload:** the backend directory is watched recursively. Edits invalidate
+the route module cache (via a `?v=<n>` import suffix) and the next request
+re-imports the latest version — no server restart, no debounce flicker.
+
+```bash
+# Defaults: ./backend, nextjs style
+biu --serve 3000
+
+# Custom location
+biu --serve 3000 --backend-dir ./api
+```
+
+## CDN Caching
+
+`--cdn-cache` lets you ship a build that works fully offline by mirroring
+every external CDN dependency into a local directory. It is opt-in — without
+the flag biu ignores remote URLs.
+
+**What is discovered:**
+
+- HTML attributes: `<script src>`, `<link href>`, `<img src>`, `<iframe src>`,
+  `<video src>`, `<source src>`, `data-src`, etc.
+- `<script type="importmap">` JSON entries (recursively).
+- CSS: `url(https://...)` and `@import "https://..."`.
+- JS/TS: `import ... from "https://..."`, bare `import "..."`, dynamic
+  `import("...")`, `new URL("https://...")`, plus conservative literal-URL
+  detection for runtime loaders (covers
+  `s.src = "https://cdn/foo.js"` style code).
+- Recursive walk: each fetched JS/CSS body is scanned for further CDN URLs
+  (and relative paths inside CDN packages) until the closure is complete.
+
+**What happens at build time:**
+
+1. URLs are downloaded into `<cacheDir>/<host>/<path>`
+   (default `cacheDir`: `.biu-cache/cdn`, persistent across builds).
+2. A manifest (`manifest.json`) is written next to the cache so subsequent
+   builds reuse it even if the network is unavailable.
+3. JS/CSS bodies inside the cache are rewritten to refer to their cache
+   siblings via relative paths — the cache directory is fully self-contained.
+4. The cache is mirrored into `<outDir>/cdn/`.
+5. All HTML / CSS / JS in `<outDir>` are rewritten so the original CDN URLs
+   point at `./cdn/<host>/<path>`.
+6. A tiny runtime shim (`<script data-biu-cdn>`) is injected into every HTML
+   that intercepts dynamic `document.createElement('script'|'link')`,
+   `fetch()`, and `XMLHttpRequest` calls and redirects known CDN URLs to the
+   local copy. Unknown URLs fall back to the network — or, in `--serve` mode,
+   to the dev-server proxy at `/_cdn/<host>/<path>`.
+
+**Dev-server proxy:** while `biu --serve` is running with `--cdn-cache`, any
+request to `/_cdn/<host>/<path>` is served from cache; on a miss it fetches
+upstream, writes to cache, and serves the body. With `--offline` the proxy
+returns `504` instead of touching the network.
+
+**Examples:**
+
+```bash
+# Default cache dir (.biu-cache/cdn) — fetch on first build, cache on subsequent
+biu --cdn-cache
+
+# Custom cache dir
+biu --cdn-cache ./vendor-cdn
+
+# Build for production with no network at all (CI without egress, air-gapped, etc.)
+biu --cdn-cache --offline
+
+# Dev server with on-demand proxy filling
+biu --serve 3000 --cdn-cache
+```
+
+After the build, `<outDir>/cdn/` is fully self-contained and can be deployed
+along with the rest of the site — your users never hit the upstream CDN.
 
 ## Environment Variables
 
