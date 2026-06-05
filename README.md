@@ -79,6 +79,42 @@ demo-project/                   ← Example project for testing
 
 ## Installation & Compilation
 
+### Quick install (prebuilt binary)
+
+If a prebuilt binary has been published to the GitHub Releases of
+[`mindon/biu`](https://github.com/mindon/biu/releases), you can install it
+without cloning the repo:
+
+**macOS / Linux / WSL:**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/mindon/biu/main/install.sh | bash
+```
+
+**Windows (PowerShell):**
+
+```powershell
+powershell -c "irm https://raw.githubusercontent.com/mindon/biu/main/install.ps1 | iex"
+```
+
+The installers download `biu-<target>` (or `biu-<target>.exe` on Windows) into
+`$BIU_INSTALL/bin` (default `~/.biu/bin` / `%USERPROFILE%\.biu\bin`) and add it
+to your `PATH`. Supported targets:
+
+| Target            | Asset name                  |
+| ----------------- | --------------------------- |
+| `darwin-x64`      | `biu-darwin-x64`            |
+| `darwin-aarch64`  | `biu-darwin-aarch64`        |
+| `linux-x64`       | `biu-linux-x64`             |
+| `linux-aarch64`   | `biu-linux-aarch64`         |
+| `windows-x64`     | `biu-windows-x64.exe`       |
+| `windows-aarch64` | `biu-windows-aarch64.exe`   |
+
+Override defaults via env vars: `BIU_INSTALL` (install root) or `GITHUB`
+(GitHub origin, useful for proxy mirrors).
+
+### Build from source
+
 Since `biu` is built with Bun, you can compile it into a single executable
 binary for portability.
 
