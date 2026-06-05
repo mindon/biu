@@ -17,7 +17,7 @@
         : ""
     }${
       q.has("faker")
-        ? `,"@faker-js/faker@v7.1.0": "https://cdn.skypack.dev/@faker-js/faker@v7.1.0",`
+        ? `,"@faker-js/faker@v7.1.0": "https://cdn.skypack.dev/@faker-js/faker@v7.1.0"`
         : ""
     }}
 }`,

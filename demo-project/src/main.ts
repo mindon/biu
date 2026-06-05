@@ -8,7 +8,11 @@ console.log(TIMESTAMP);
 import { faker } from "@faker-js/faker@v7.1.0";
 console.log(faker);
 
+import "./hey/auto-inline";
+
 const myWorker = new Worker("/worker.ts");
 myWorker.onmessage = (e) => {
   console.log("Message received from worker", e.data);
 };
+
+import "/simple.js";

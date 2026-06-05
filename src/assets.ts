@@ -4,7 +4,7 @@ import { existsSync } from "node:fs";
 import { cp, mkdir } from "node:fs/promises";
 import { basename, dirname, extname, join, relative } from "node:path";
 import { contentHash } from "./utils.ts";
-import { scan } from "./utils.ts";
+import { isRealChange, scan } from "./utils.ts";
 
 /**
  * 复制静态资源文件到 outDir，加上内容 hash
@@ -75,6 +75,7 @@ export async function copyStaticDir(
     if (staticFiles.length > 0) {
       const extCounts = new Map<string, number>();
       for (const f of staticFiles) {
+        isRealChange(f);
         const ext = extname(f).toLowerCase() || "(no ext)";
         extCounts.set(ext, (extCounts.get(ext) ?? 0) + 1);
       }

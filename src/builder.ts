@@ -35,8 +35,14 @@ interface FileScan {
   assetRefs: string[];
 }
 
+// 匹配相对/根路径的 import / from 语句。
+// 故意放宽到"任意非空 specifier"，包括无扩展名形式（如 `import "./hey/auto-inline"`），
+// 由 scanner 在解析阶段尝试补全 .ts/.js/.mts/.cts/.mjs/.cjs/index.* 扩展名；
+// 不在 jsFileSet 中的目标会被丢弃，因此不会误把 bare specifier 识别为本地 import。
+//   - group 1: 主路径（不含 ?# 后缀）—— 必须以 . 或 / 起头
+//   - group 2: 后缀（?... 或 #...，可空），其中含 `??` 表示 force-inline
 const FILE_IMPORT_TS_RE =
-  /(?:import|from)\s+["'](\.?\/?.*?\.(ts|js)([#\?][^"']*)?)["']/g;
+  /(?:import|from)\s+["'](\.{1,2}\/[^"'#?]*|\/[^"'#?]*)([#\?][^"']*)?["']/g;
 // 字符串字面量引用的资源后缀。包含 ts/js/mts/mjs 是为了识别"动态加载"
 // 模式（如 `s.src = "./a.js"`、`new Worker("./a.ts")`、`loadScript("./a.js")`），
 // 这些不会出现在 import/from 里，但其源文件改动应让引用方产物 hash 变化，
@@ -63,14 +69,69 @@ function createFileScanner(jsFileSet: Set<string>) {
 
       const imports: FileScan["imports"] = [];
       for (const m of code.matchAll(FILE_IMPORT_TS_RE)) {
-        const raw = m[1];
-        const cleanSpec = raw.replace(/[#\?].*$/, "");
-        const abs = resolve(dir, cleanSpec);
-        if (!jsFileSet.has(abs) || abs === file) continue;
+        const mainPath = m[1];
+        const suffix = m[2] ?? "";
+        // raw 保留 `?#` 后缀语义（force-inline `??` 由它判定）
+        const raw = mainPath + suffix;
+        const baseAbs = resolve(dir, mainPath);
+
+        // 解析为项目内的真实源文件：依次尝试
+        //   1) 原路径直接命中（带扩展名的常规 import）
+        //   2) 无扩展名 → 依次补 .ts / .mts / .cts / .tsx / .js / .mjs / .cjs / .jsx
+        //   3) 目录形式 → 补 /index.{ts,js,...}
+        // 若用户写了 `.js` 但盘上是 `.ts`（动态化常见），同样按 (2) 的列表替换扩展名。
+        let abs: string | null = null;
+        if (jsFileSet.has(baseAbs)) {
+          abs = baseAbs;
+        } else {
+          const exts = [
+            ".ts",
+            ".mts",
+            ".cts",
+            ".tsx",
+            ".js",
+            ".mjs",
+            ".cjs",
+            ".jsx",
+          ];
+          // 无扩展名 → 直接拼
+          const lower = baseAbs.toLowerCase();
+          const hasJsLikeExt = /\.[mc]?[jt]sx?$/.test(lower);
+          if (!hasJsLikeExt) {
+            for (const ext of exts) {
+              const cand = baseAbs + ext;
+              if (jsFileSet.has(cand)) {
+                abs = cand;
+                break;
+              }
+            }
+            // 目录形式：./foo → ./foo/index.{ts,...}
+            if (!abs) {
+              for (const ext of exts) {
+                const cand = resolve(baseAbs, `index${ext}`);
+                if (jsFileSet.has(cand)) {
+                  abs = cand;
+                  break;
+                }
+              }
+            }
+          } else {
+            // 用户写了 .js 但实际是 .ts（动态加载/重命名场景）
+            const noExt = baseAbs.replace(/\.[mc]?[jt]sx?$/i, "");
+            for (const ext of exts) {
+              const cand = noExt + ext;
+              if (jsFileSet.has(cand)) {
+                abs = cand;
+                break;
+              }
+            }
+          }
+        }
+        if (!abs || abs === file) continue;
         imports.push({
           abs,
           raw,
-          extra: m[3] ?? "",
+          extra: suffix,
           forceInline: /\?\?/.test(raw),
         });
       }
@@ -237,6 +298,7 @@ async function updateJsImports(
   sourceToOutputCss: Map<string, string>,
   sourceToOutputAsset: Map<string, string>,
   extras: Record<string, string>,
+  moduleInlineFiles?: Map<string, string[]>,
 ) {
   // 构建产物路径 → 源文件路径的反向映射
   const outputToSource = new Map<string, string>();
@@ -291,8 +353,18 @@ async function updateJsImports(
         // (b) 替换 JS 产物中的字符串路径引用（静态资源 + CSS + JS/TS）
         const jsSrcFile = outputToSource.get(output.path);
         if (jsSrcFile) {
-          const jsSrcDir = dirname(jsSrcFile);
           const jsOutDir = dirname(output.path);
+
+          // 候选"源目录基准"集合：
+          //   entry 源文件目录 + 所有传递可达的内联（force-inline）文件目录。
+          //   原因：被内联的中转文件里的字符串字面量（如 `new Worker("./w.ts")`）
+          //   是按 *它自己的* 源文件目录写的相对路径；合并到 entry 产物后，
+          //   仅以 entry 目录为基准计算 relative() 会漏匹配。
+          const candidateDirs = new Set<string>([dirname(jsSrcFile)]);
+          const inlineFiles = moduleInlineFiles?.get(jsSrcFile);
+          if (inlineFiles) {
+            for (const f of inlineFiles) candidateDirs.add(dirname(f));
+          }
 
           // 合并所有需要替换的映射
           const allMappings: [string, string][] = [];
@@ -308,28 +380,65 @@ async function updateJsImports(
           }
 
           // 按相对路径长度降序排列，长路径优先匹配
+          // （以 entry 目录为基准排序即可，内联候选基准排序差异忽略不计）
+          const sortBaseDir = dirname(jsSrcFile);
           allMappings.sort((a, b) =>
-            relative(jsSrcDir, b[0]).length - relative(jsSrcDir, a[0]).length
+            relative(sortBaseDir, b[0]).length -
+            relative(sortBaseDir, a[0]).length
           );
 
+          // entry 源目录 — 用于把候选 baseDir 镜像到产物侧。
+          // 由于 jsBuild 用 outdir 保留了 src 目录结构（e.g. src/hey/x.ts → dist/hey/x.<hash>.js），
+          // 内联文件源目录 baseDir 在产物侧对应的目录就是
+          //   outBaseDir = jsOutDir + relative(srcEntryDir, baseDir)
+          // 这样替换出的相对路径与原字面量的"路径形状"保持一致，
+          // 不会破坏诸如 `base + "./w.ts"` 的字符串拼接语义。
+          const srcEntryDir = dirname(jsSrcFile);
+
           for (const [mappedSrcFile, mappedOutFile] of allMappings) {
-            const relFromJs = relative(jsSrcDir, mappedSrcFile);
-            // 对 .ts/.mts 源文件，额外接受 .js/.mjs 形式的字符串引用
-            // （动态加载场景：用户写 `s.src="./a.js"` 而源是 `a.ts`）
-            const altRels: string[] = [relFromJs];
-            const lowerRel = relFromJs.toLowerCase();
-            if (lowerRel.endsWith(".ts")) {
-              altRels.push(`${relFromJs.slice(0, -3)}.js`);
-            } else if (lowerRel.endsWith(".mts")) {
-              altRels.push(`${relFromJs.slice(0, -4)}.mjs`);
-            } else if (lowerRel.endsWith(".cts")) {
-              altRels.push(`${relFromJs.slice(0, -4)}.cjs`);
+            // 对每个候选源目录基准都生成相对路径变体；
+            // .ts/.mts/.cts 额外补一份 .js/.mjs/.cjs 形式（用户可能写
+            // `s.src="./a.js"` 而源是 a.ts）。
+            // 用 (alt → baseDir) 配对：每个变体记住自己的源基准，
+            // 改写时按对应基准镜像计算产物侧相对路径。
+            // 同一 alt 字符串可能由多个 baseDir 产生，保留最近的（先到先得即可，
+            // 因为产物对应路径会一致）。
+            const altMap = new Map<string, string>(); // alt → baseDir
+            for (const baseDir of candidateDirs) {
+              const rel = relative(baseDir, mappedSrcFile);
+              if (!rel) continue;
+              if (!altMap.has(rel)) altMap.set(rel, baseDir);
+              const lower = rel.toLowerCase();
+              if (lower.endsWith(".ts")) {
+                const a = `${rel.slice(0, -3)}.js`;
+                if (!altMap.has(a)) altMap.set(a, baseDir);
+              } else if (lower.endsWith(".mts")) {
+                const a = `${rel.slice(0, -4)}.mjs`;
+                if (!altMap.has(a)) altMap.set(a, baseDir);
+              } else if (lower.endsWith(".cts")) {
+                const a = `${rel.slice(0, -4)}.cjs`;
+                if (!altMap.has(a)) altMap.set(a, baseDir);
+              }
             }
-            for (const alt of altRels) {
+            for (const [alt, baseDir] of altMap) {
               const escapedRelPath = alt.replace(
                 /[.*+?^${}()|[\]\\]/g,
                 "\\$&",
               );
+              // 该 alt 对应的产物侧基准目录（镜像源端 baseDir）。
+              const relBase = relative(srcEntryDir, baseDir);
+              const outBaseDir = relBase ? join(jsOutDir, relBase) : jsOutDir;
+              let relOutput = relative(outBaseDir, mappedOutFile);
+              // 同目录下 relative() 返回裸文件名（如 "worker.xxx.js"）。
+              // 对于 `new Worker("...")` / `import("...")` / 动态 src 赋值，
+              // 浏览器要求 URL 以 ./ ../ / http(s): 开头才稳妥（worker
+              // 规范尤其严格），裸文件名在某些环境下会被当成 bare specifier
+              // 解析失败。统一补上 "./" 前缀（除非已是 ../ 形式）。
+              if (
+                !relOutput.startsWith(".") && !relOutput.startsWith("/")
+              ) {
+                relOutput = `./${relOutput}`;
+              }
               const newCode = code.replace(
                 new RegExp(
                   `(["'\`])(?:\\.\\/)?${escapedRelPath}(["'\`])`,
@@ -347,17 +456,6 @@ async function updateJsImports(
                   const before = code.slice(Math.max(0, offset - 50), offset);
                   if (/(?:import|from)\s*$/i.test(before)) {
                     return match;
-                  }
-                  let relOutput = relative(jsOutDir, mappedOutFile);
-                  // 同目录下 relative() 返回裸文件名（如 "worker.xxx.js"）。
-                  // 对于 `new Worker("...")` / `import("...")` / 动态 src 赋值，
-                  // 浏览器要求 URL 以 ./ ../ / http(s): 开头才稳妥（worker
-                  // 规范尤其严格），裸文件名在某些环境下会被当成 bare specifier
-                  // 解析失败。统一补上 "./" 前缀。
-                  if (
-                    !relOutput.startsWith(".") && !relOutput.startsWith("/")
-                  ) {
-                    relOutput = `./${relOutput}`;
                   }
                   return `${q1}${relOutput}${q2}`;
                 },
@@ -699,6 +797,11 @@ export async function buildProject(
   // 否则中转文件里的字符串引用变化不会触达 entry 的 hash。
   // 实现：直接复用共享 scanner（同一文件全程仅扫描一次）。
   const moduleAssetRefs = new Map<string, string[]>(); // entry → 引用资源源文件绝对路径数组
+  // entry → 所有传递可达的内联文件源路径（含 entry 自身）
+  // 用于 updateJsImports (b) 段：内联代码里的字符串字面量是相对各自源文件目录写的，
+  // 被合并到上游产物后相对基准变了，只用 entry 目录算相对路径会漏匹配，
+  // 必须把每个 inline 文件目录都当成候选基准再扫一次。
+  const moduleInlineFiles = new Map<string, string[]>();
   await Promise.all(
     moduleEntries.map(async (file) => {
       const refs = new Set<string>();
@@ -724,6 +827,10 @@ export async function buildProject(
       if (refs.size > 0) {
         moduleAssetRefs.set(file, Array.from(refs).sort());
       }
+      if (inlineFiles.length > 1) {
+        // 仅当 entry 实际有内联中转时记录（节省内存）
+        moduleInlineFiles.set(file, inlineFiles);
+      }
     }),
   );
 
@@ -735,14 +842,30 @@ export async function buildProject(
       // 收集当前 module 的直接依赖产物文件名作为内容指纹种子；
       // 任意上游产物 hash 变化 → seed 变 → entry 自身产物 hash 变 → 文件名变 → 浏览器/CDN 缓存自动失效。
       // 用 basename 而不是绝对路径，确保移动 dist 目录不影响 hash。
+      //
+      // ⚠️ 循环依赖场景：拓扑排序失败 → sortedModules 回退到原顺序，
+      //    导致 buildOne 执行到 file 时其某些 directDep 还没构建出来
+      //    （moduleOutputs.get(dep) === undefined）。
+      //    若此时简单跳过未知 dep，seed 会丢失 → entry 产物 hash 不再
+      //    跟随上游变化 → 浏览器缓存失效失灵（即用户报告的"index 产物
+      //    没有 __biu_upstream__"）。
+      //    回退方案：用上游 src 文件的 16 位内容 hash 作为替代项。
+      //    源码内容是确定性输入，不受构建顺序影响；上游源码变 → seed 变
+      //    → 缓存语义依旧正确。
       const seedParts: string[] = [];
       const directDeps = moduleDeps.get(file);
       if (directDeps && directDeps.size > 0) {
         const upstream: string[] = [];
-        for (const dep of directDeps) {
-          const out = moduleOutputs.get(dep);
-          if (out) upstream.push(basename(out));
-        }
+        const upstreamRaw = await Promise.all(
+          Array.from(directDeps).map(async (dep) => {
+            const out = moduleOutputs.get(dep);
+            if (out) return basename(out);
+            // fallback：上游产物未知（循环依赖等），用 src 内容 hash
+            const h = await hashAssetCached(dep);
+            return h ? `${basename(dep)}~${h}` : null;
+          }),
+        );
+        for (const u of upstreamRaw) if (u) upstream.push(u);
         if (upstream.length > 0) {
           upstream.sort();
           seedParts.push(`m:${upstream.join(",")}`);
@@ -927,6 +1050,7 @@ export async function buildProject(
       sourceToOutputCss,
       sourceToOutputAsset,
       extras,
+      moduleInlineFiles,
     ),
   ]);
 
@@ -1050,6 +1174,46 @@ export async function buildProject(
         warnings.push(
           `  ${relative(srcDir, file)}: url("${ref}") → missing`,
         );
+      }
+    }
+
+    // 从 JS/TS 源文件中提取 web-root 引用（以 "/" 起头的 specifier，
+    // 例如 `import "/simple.js"`、`new Worker("/worker.ts")`、
+    // `loadScript("/x.js")`）。biu 把它们作为 external 交给浏览器按部署
+    // 根（即 `static/` 复制后的位置）解析；这里校验对应文件是否存在于
+    // `static/`，否则在运行时会 404，提前警告。
+    if (resolvedStaticDir) {
+      // 字符串里以 "/" 起头的相对部署根路径；排除 //host (protocol-relative)、
+      // 路径中包含空格、以及特殊扩展（数据 URI 之类已被起头字符过滤掉了）。
+      const ROOT_REF_RE =
+        /["'`](\/[A-Za-z0-9_./~@-][^"'`\s?#]*)(?:[?#][^"'`]*)?["'`]/g;
+      const seenRootRef = new Set<string>();
+      for (const file of jsFiles) {
+        const code = await Bun.file(file).text();
+        for (const m of code.matchAll(ROOT_REF_RE)) {
+          const ref = m[1];
+          // 过滤明显非资源的文本：必须有扩展名或目录形式，且不是双斜杠开头
+          if (ref.startsWith("//")) continue;
+          // 只关心带可识别扩展名的（避免误报路径形式的字符串常量）
+          const ext = extname(ref).toLowerCase();
+          if (!ext) continue;
+          // ts/mts/cts → 在产物中会变为对应 js（用户写 /worker.ts，运行时
+          // 浏览器实际请求需要 /worker.<hash>.js；这超出本校验范围，跳过）
+          if (/^\.[mc]?[jt]sx?$/.test(ext)) {
+            // js / mjs / cjs：直接落到 static/<path>，可校验
+            if (!/^\.[mc]?js$/.test(ext)) continue;
+          } else if (!ASSET_EXTS.has(ext)) {
+            continue;
+          }
+          if (seenRootRef.has(`${file}::${ref}`)) continue;
+          seenRootRef.add(`${file}::${ref}`);
+          // 部署根 → static/ 下相同子路径
+          const inStatic = join(resolvedStaticDir, ref);
+          if (existsSync(inStatic)) continue;
+          warnings.push(
+            `  ${relative(srcDir, file)}: "${ref}" → missing in static/`,
+          );
+        }
       }
     }
 

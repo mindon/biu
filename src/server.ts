@@ -1,9 +1,10 @@
 // biu — watch mode & dev server
 
-import { existsSync, lstatSync, statSync, watch } from "node:fs";
+import { existsSync, lstatSync, watch } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { basename, dirname, extname, join, relative, resolve } from "node:path";
 import { excludedRules } from "./constants.ts";
+import { isRealChange } from "./utils.ts";
 
 function ignored(filename?: string): boolean {
   if (!filename) return true;
@@ -14,24 +15,6 @@ function ignored(filename?: string): boolean {
   if (/(?:\.swp|\.swx|~)$/i.test(base)) return true;
   if (excludedRules?.test(filename)) return true;
   return false;
-}
-
-// 真实变更去重：fs.watch 在 macOS 上会对某些文件周期性发出虚假
-// rename 事件（已观测到 ~213ms 一次）。这里基于 (size, mtimeMs) 指纹
-// 过滤掉指纹未变化的事件。
-const fingerprints = new Map<string, string>();
-function isRealChange(absPath: string): boolean {
-  let fp = "missing";
-  try {
-    const st = statSync(absPath);
-    fp = `${st.size}:${st.mtimeMs}`;
-  } catch {
-    // 文件被删除：missing 也是一种状态变化
-  }
-  const prev = fingerprints.get(absPath);
-  if (prev === fp) return false;
-  fingerprints.set(absPath, fp);
-  return true;
 }
 
 /**

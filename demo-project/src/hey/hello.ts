@@ -1,5 +1,5 @@
 import "./force-inline.ts??";
-import { hello } from "./auto-inline.ts";
-console.log(hello);
+import "../cool/a.ts";
+import "../cool/mid";
 import { TIMESTAMP } from "./world.ts";
 console.log(TIMESTAMP);

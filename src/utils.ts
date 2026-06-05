@@ -1,6 +1,7 @@
 // biu — utility functions
 
 import { join } from "node:path";
+import { statSync } from "node:fs";
 
 /** 生成内容 hash（取前8位），用于输出文件名 */
 export function contentHash(
@@ -51,4 +52,22 @@ export function hashAssetCached(ref: string): Promise<string | null> {
 /** 在每次完整构建开始前清空缓存，避免 watch / dev 模式下读到陈旧 hash */
 export function resetAssetHashCache(): void {
   assetHashCache.clear();
+}
+
+// 真实变更去重：fs.watch 在 macOS 上会对某些文件周期性发出虚假
+// rename 事件（已观测到 ~213ms 一次）。这里基于 (size, mtimeMs) 指纹
+// 过滤掉指纹未变化的事件。
+const fingerprints = new Map<string, string>();
+export function isRealChange(absPath: string): boolean {
+  let fp = "missing";
+  try {
+    const st = statSync(absPath);
+    fp = `${st.size}:${st.mtimeMs}`;
+  } catch {
+    // 文件被删除：missing 也是一种状态变化
+  }
+  const prev = fingerprints.get(absPath);
+  if (prev === fp) return false;
+  fingerprints.set(absPath, fp);
+  return true;
 }

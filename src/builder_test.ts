@@ -1,5 +1,5 @@
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
-import { join, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
 import { existsSync } from "node:fs";
 import { mkdir, rm } from "node:fs/promises";
 import { buildProject } from "./builder.ts";
@@ -65,7 +65,7 @@ describe("buildProject — integration", () => {
     }
   });
 
-  test("inline <script type=module> imports keep './' prefix for same-dir files", async () => {
+  test("inline <script type=module> imports keep relative prefix (./ or ../)", async () => {
     try {
       await buildProject(demoSrc, tmpOut);
 
@@ -73,8 +73,10 @@ describe("buildProject — integration", () => {
         .text();
       // ES module specifiers must start with "/", "./" or "../" — a bare
       // "world2.<hash>.js" would throw `Failed to resolve module specifier`.
+      // 当前 fixture 中 world.html 引用 "../cool/world2.ts"，期望产物保持
+      // "../cool/world2.<hash>.js"（保留相对前缀）。
       expect(worldHtml).toMatch(
-        /\bfrom\s*["']\.\/world2[.\-][0-9a-z]+\.js["']/,
+        /\bfrom\s*["'](?:\.\/|\.\.\/)[^"']*world2[.\-][0-9a-z]+\.js["']/,
       );
       // Must NOT produce a bare specifier import.
       expect(worldHtml).not.toMatch(
@@ -474,6 +476,185 @@ describe("buildProject — dynamic-script reference", () => {
     expect(occ).toBeGreaterThanOrEqual(2);
   });
 
+  test("string-literal worker refs in inlined transit modules are rewritten with original path shape", async () => {
+    // 场景：main.ts → import "./hey/auto-inline.ts"（中转，被内联）
+    //       auto-inline.ts → new Worker("./world2.ts")（按它自己的目录写的相对路径）
+    // 期望：world2.ts 单独构建为产物，main 产物里字面量改写为
+    //       "./world2.<hash>.js"（保持原层级形状），而不是
+    //       "./hey/world2.<hash>.js"（错误地以 main 目录为基准）。
+    await mkdir(join(tmpInlineSrc, "hey"), { recursive: true });
+    await Bun.write(
+      join(tmpInlineSrc, "hey", "world2.ts"),
+      `export const v = 2;`,
+    );
+    await Bun.write(
+      join(tmpInlineSrc, "hey", "auto-inline.ts"),
+      [
+        `export const tag = "auto";`,
+        `const base = () => "/hey/";`,
+        `const w = new Worker(base() + "./world2.ts");`,
+        `w.onmessage = (e) => console.log(e.data);`,
+      ].join("\n"),
+    );
+    await Bun.write(
+      join(tmpInlineSrc, "main.ts"),
+      [
+        `import "./hey/auto-inline.ts";`,
+        `console.log("main");`,
+      ].join("\n"),
+    );
+    await Bun.write(
+      join(tmpInlineSrc, "index.html"),
+      `<html><body><script type="module" src="./main.ts"></script></body></html>`,
+    );
+
+    await buildProject(tmpInlineSrc, tmpInlineOut);
+
+    const files = await Array.fromAsync(
+      new Bun.Glob("**/*.js").scan(tmpInlineOut),
+    );
+    // world2 必须独立产物
+    const world2 = files.find((f) => /^hey\/world2[.\-][0-9a-z]+\.js$/.test(f));
+    expect(world2).toBeDefined();
+
+    // auto-inline 不应单独产物（它通过裸 import 被内联）
+    expect(files.some((f) => /auto-inline/.test(f))).toBe(false);
+
+    // main 产物里字面量必须改写为 "./world2.<hash>.js"（与原字面量同层级），
+    // 不可改成 "./hey/world2.<hash>.js"（破坏了 base() + "..." 的拼接语义）。
+    const main = files.find((f) => /^main[.\-][0-9a-z]+\.js$/.test(f))!;
+    const code = await Bun.file(join(tmpInlineOut, main)).text();
+    const world2Base = world2!.replace(/^hey\//, "");
+    expect(code).toContain(`"./${world2Base}"`);
+    expect(code).not.toContain(`"./hey/${world2Base}"`);
+    expect(code).not.toMatch(/["']\.\/world2\.ts["']/); // 裸 .ts 必须消失
+  });
+
+  test("extensionless import propagates transitive deps into entry hash", async () => {
+    // 场景（demo-project 里复现的真实问题）：
+    //   main.ts → import "./hey/auto-inline";  (无扩展名！)
+    //   auto-inline.ts → import "../cool/mid.ts";   (cool/mid.ts 是独立 module)
+    //   cool/mid.ts → import { v } from "./world2.ts";
+    //
+    // 之前 BUG：scanner 的 import 正则强制要求 `.ts`/`.js` 后缀，
+    //   所以 `import "./hey/auto-inline"` 完全不被识别 →
+    //   main 的传递依赖图遗漏了 auto-inline / mid / world2 →
+    //   mid 改动 → main 内容指纹不变 → main 文件名 hash 不变 →
+    //   浏览器 / CDN 命中旧版 main.<oldhash>.js（其内部 import 路径已被
+    //   补丁式更新到新 mid hash，但文件名没变 → 缓存灾难）。
+    //
+    // 期望：mid 改动 → main 文件名 hash 必须跟着变。
+    await mkdir(join(tmpInlineSrc, "hey"), { recursive: true });
+    await mkdir(join(tmpInlineSrc, "cool"), { recursive: true });
+    await Bun.write(
+      join(tmpInlineSrc, "cool", "world2.ts"),
+      `export const v = 1;\nconsole.log("world2");`,
+    );
+    await Bun.write(
+      join(tmpInlineSrc, "cool", "mid.ts"),
+      `import { v } from "./world2.ts";\nconsole.log("mid", v);`,
+    );
+    await Bun.write(
+      join(tmpInlineSrc, "hey", "auto-inline.ts"),
+      `import "../cool/mid.ts";\nexport const tag = "auto";`,
+    );
+    await Bun.write(
+      join(tmpInlineSrc, "main.ts"),
+      [
+        // 关键：无扩展名 import
+        `import "./hey/auto-inline";`,
+        `console.log("main");`,
+      ].join("\n"),
+    );
+    // 让 mid.ts / world2.ts 成为独立 module（basename 命中某个 HTML）。
+    // 测试要复现的核心 bug 只在"传递依赖中包含独立 module"时才出现。
+    await Bun.write(
+      join(tmpInlineSrc, "index.html"),
+      `<html><body>` +
+        `<script type="module" src="./main.ts"></script>` +
+        `<script type="module" src="./cool/mid.ts"></script>` +
+        `<script type="module" src="./cool/world2.ts"></script>` +
+        `</body></html>`,
+    );
+
+    // 第一次构建
+    await buildProject(tmpInlineSrc, tmpInlineOut);
+    let files = await Array.fromAsync(
+      new Bun.Glob("**/*.js").scan(tmpInlineOut),
+    );
+    const main1 = files.find((f) => /^main[.\-][0-9a-z]+\.js$/.test(f))!;
+    const mid1 = files.find((f) => /^cool\/mid[.\-][0-9a-z]+\.js$/.test(f))!;
+    const world2_1 = files.find((f) =>
+      /^cool\/world2[.\-][0-9a-z]+\.js$/.test(f)
+    )!;
+    expect(main1).toBeDefined();
+    expect(mid1).toBeDefined();
+    expect(world2_1).toBeDefined();
+
+    // main 产物里必须 import 真实的 mid hash 文件（而非裸 .ts 或裸 .js）
+    let mainCode = await Bun.file(join(tmpInlineOut, main1)).text();
+    expect(mainCode).toContain(basename(mid1));
+
+    // 修改 world2.ts —— 触发传递更新
+    await Bun.write(
+      join(tmpInlineSrc, "cool", "world2.ts"),
+      `export const v = 2;\nconsole.log("world2 v2");`,
+    );
+
+    // 第二次构建
+    await buildProject(tmpInlineSrc, tmpInlineOut);
+    files = await Array.fromAsync(new Bun.Glob("**/*.js").scan(tmpInlineOut));
+    const main2 = files.find((f) => /^main[.\-][0-9a-z]+\.js$/.test(f))!;
+    const mid2 = files.find((f) => /^cool\/mid[.\-][0-9a-z]+\.js$/.test(f))!;
+    const world2_2 = files.find((f) =>
+      /^cool\/world2[.\-][0-9a-z]+\.js$/.test(f)
+    )!;
+
+    // 三层 hash 必须全部变化 —— 这是修复的核心断言
+    expect(world2_2).not.toBe(world2_1);
+    expect(mid2).not.toBe(mid1);
+    expect(main2).not.toBe(main1); // ← 修复前这里失败：main hash 不变
+
+    // main 产物内部也要指向新 mid（既要文件名变，又要内容正确）
+    mainCode = await Bun.file(join(tmpInlineOut, main2)).text();
+    expect(mainCode).toContain(basename(mid2));
+    expect(mainCode).not.toContain(basename(mid1));
+  });
+
+  test("root-absolute import (e.g. /simple.js) is kept external", async () => {
+    // 场景：在 main.ts 中写 `import "/simple.js"`，语义上是\"部署根 web root\"
+    // 引用（运行时由浏览器从静态目录加载）。
+    // 之前 BUG：bun 默认把 `/` 起头的 specifier 当作\"文件系统绝对路径\"
+    //   解析 → 报错 `Could not resolve: \"/simple.js\"`，整个构建失败。
+    // 期望：构建成功，产物里原样保留 `import "/simple.js"`（external）。
+    await Bun.write(
+      join(tmpInlineSrc, "main.ts"),
+      [
+        `import "/simple.js";`,
+        `import "/assets/icon.png";`,
+        `console.log("main");`,
+      ].join("\n"),
+    );
+    await Bun.write(
+      join(tmpInlineSrc, "index.html"),
+      `<html><body><script type="module" src="./main.ts"></script></body></html>`,
+    );
+
+    await buildProject(tmpInlineSrc, tmpInlineOut);
+    const files = await Array.fromAsync(
+      new Bun.Glob("**/*.js").scan(tmpInlineOut),
+    );
+    const main = files.find((f) => /^main[.\-][0-9a-z]+\.js$/.test(f))!;
+    expect(main).toBeDefined();
+
+    const code = await Bun.file(join(tmpInlineOut, main)).text();
+    // 必须 external 原样保留（绝不能被解析为相对路径或被 bundle）
+    expect(code).toContain(`"/simple.js"`);
+    expect(code).toContain(`"/assets/icon.png"`);
+    // 不应出现解析后的本地路径前缀
+    expect(code).not.toMatch(/["']\.\/simple\.js["']/);
+  });
+
   test("absolute / external URIs in string literals are left untouched", async () => {
     // 锁定语义：绝对 URI / 协议相对 URL / 根路径 / file:// 一律不参与改写
     // —— 它们指向外部资源或运行时由 dev server / CDN 解析的路径，构建期不应介入。
@@ -519,6 +700,77 @@ describe("buildProject — dynamic-script reference", () => {
     expect(files.some((f) => /^w[.\-][0-9a-z]+\.js$/.test(f))).toBe(false);
     expect(files.some((f) => /^worker[.\-][0-9a-z]+\.js$/.test(f))).toBe(false);
   });
+
+  test(
+    "circular module deps still inject __biu_upstream__ seed (src-hash fallback)",
+    async () => {
+      // 复现 BUG：当两个 module entry 互相 import（如 worker ↔ runner），
+      // 拓扑排序失败 → sortedModules 回退到原顺序 → 第一个被构建的 entry
+      // 看不到任何上游产物（moduleOutputs.get(dep) === undefined）。
+      // 之前的实现：seedParts 为空 → entryHashSeed = undefined →
+      //   产物里没有 `__biu_upstream__` 注释 → 上游变化无法触发该 entry
+      //   产物 hash 变更 → 浏览器/CDN 缓存失效失灵。
+      // 修复：当上游产物名缺失时，回退到使用上游 src 文件的 16 位内容 hash。
+      await Bun.write(
+        join(tmpInlineSrc, "runner.ts"),
+        // 通过字符串字面量引用 worker.ts → biu 把 worker.ts 升级为 module
+        `const w = new Worker("./worker.ts");\nexport const r = 1;`,
+      );
+      await Bun.write(
+        join(tmpInlineSrc, "worker.ts"),
+        // 通过字符串字面量回引 runner.ts → 形成 module 间循环依赖
+        `const r = "./runner.ts";\nexport const w = 1;\nconsole.log(r);`,
+      );
+      await Bun.write(
+        join(tmpInlineSrc, "main.ts"),
+        // main 同时依赖 runner 和 worker，是 entry hash 应跟随上游变化的下游
+        `import "./runner";\nimport "./worker";`,
+      );
+      await Bun.write(
+        join(tmpInlineSrc, "index.html"),
+        `<html><body>` +
+          `<script type="module" src="./main.ts"></script>` +
+          `<script type="module" src="./runner.ts"></script>` +
+          `<script type="module" src="./worker.ts"></script>` +
+          `</body></html>`,
+      );
+
+      await buildProject(tmpInlineSrc, tmpInlineOut);
+      const files1 = await Array.fromAsync(
+        new Bun.Glob("**/*.js").scan(tmpInlineOut),
+      );
+      const main1 = files1.find((f) => /^main[.\-][0-9a-z]+\.js$/.test(f))!;
+      expect(main1).toBeDefined();
+
+      const code1 = await Bun.file(join(tmpInlineOut, main1)).text();
+      // 必须出现 seed 注释；至少包含一个上游 basename（产物名 OR src 名）
+      expect(code1).toMatch(/__biu_upstream__:m:/);
+      // 修改 worker.ts 源码 → seed 应变 → main 产物 hash 应变
+      await Bun.write(
+        join(tmpInlineSrc, "worker.ts"),
+        `const r = "./runner.ts";\n` +
+          `export const w = 99;\n` +
+          `console.log(r, "VERY_DIFFERENT_CONTENT_FOR_HASH_CHANGE");`,
+      );
+      await buildProject(tmpInlineSrc, tmpInlineOut);
+      const files2 = await Array.fromAsync(
+        new Bun.Glob("**/*.js").scan(tmpInlineOut),
+      );
+      const main2 = files2.find((f) => /^main[.\-][0-9a-z]+\.js$/.test(f))!;
+      expect(main2).toBeDefined();
+
+      // 关键断言：上游变 → main 产物 hash 必变
+      expect(main2).not.toBe(main1);
+      const code2 = await Bun.file(join(tmpInlineOut, main2)).text();
+      expect(code2).toMatch(/__biu_upstream__:m:/);
+      // seed 内容必须不同（hash 段变了）
+      const seed1 = code1.match(/__biu_upstream__:[^\s*]+/)?.[0];
+      const seed2 = code2.match(/__biu_upstream__:[^\s*]+/)?.[0];
+      expect(seed1).toBeDefined();
+      expect(seed2).toBeDefined();
+      expect(seed2).not.toBe(seed1);
+    },
+  );
 });
 
 describe("buildProject — import maps", () => {

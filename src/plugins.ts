@@ -14,6 +14,31 @@ function isBareSpecifier(spec: string): boolean {
     !/^[a-z][a-z0-9+.-]*:/i.test(spec);
 }
 
+/**
+ * 把以 `/` 开头的 specifier（如 `import "/simple.js"`）标记为 external。
+ *
+ * 语义：在 biu 项目里 `/xxx` 是\"部署根路径\"——指向 `static/xxx`，运行时由
+ *      浏览器/web 服务器按 web root 解析（同 `<img src=\"/foo.png\">`）。
+ *      构建期不应尝试把它当文件系统绝对路径解析（否则 bun 会报
+ *      `Could not resolve: \"/simple.js\"`）。
+ *
+ * 注意：必须放在所有 `.ts` / `.js` 后缀过滤器之前注册，否则 bun 默认解析
+ *      会先把 `/foo.js` 当文件系统路径解析失败而直接抛错。
+ */
+function setupRootAbsoluteExternals(
+  builder: Parameters<Plugin["setup"]>[0],
+): void {
+  builder.onResolve({ filter: /^\// }, (args) => {
+    // 关键：entrypoint 传入的是文件系统绝对路径（如 /Users/.../main.ts），
+    // 此时 importer 为空——必须放过让 bun 走默认解析；否则所有 entry 都
+    // 会被 external 化，构建出 0 个 JS。
+    if (!args.importer) return undefined;
+    // 真正的 import 语句中的 / 起头 specifier → web root，标记 external，
+    // 由浏览器在运行时按部署根（即 static/ 复制到 outDir 后的位置）解析。
+    return { path: args.path, external: true };
+  });
+}
+
 function setupImportMapExternals(
   builder: Parameters<Plugin["setup"]>[0],
   importMapSpecifiers?: ImportMapSpecifiers,
@@ -54,6 +79,7 @@ export function createBasePlugin(
   return {
     name: "base-plugin",
     setup(builder) {
+      setupRootAbsoluteExternals(builder);
       setupImportMapExternals(builder, importMapSpecifiers);
       builder.onLoad({ filter: /\.(ts|js)$/ }, async (args) => {
         let code = await Bun.file(args.path).text();
@@ -63,8 +89,19 @@ export function createBasePlugin(
           "$1$2",
         );
         if (hasTemplateLiterals(code)) {
-          const result: any = await minifyHTMLLiterals(code);
-          if (result) code = result.code;
+          try {
+            const result: any = await minifyHTMLLiterals(code);
+            if (result) code = result.code;
+          } catch (e) {
+            // 模板压缩失败时降级：保留原码继续构建，只发警告。
+            // 之前的实现会让单个文件的模板异常（如复杂嵌套的 lit-html）
+            // 把整个 build 拖垮。
+            console.warn(
+              `⚠️  minify-html-literals failed in ${args.path}: ${
+                (e as Error).message
+              } — keeping original code.`,
+            );
+          }
         }
         return { contents: code, loader: "ts" };
       });
@@ -100,6 +137,7 @@ export function createMainPlugin(
   return {
     name: "main-plugin",
     setup(builder) {
+      setupRootAbsoluteExternals(builder);
       setupImportMapExternals(builder, importMapSpecifiers);
       // 预先把 entry 归一化为 realpath，避免 macOS 下 `/tmp` ↔ `/private/tmp`
       // 这类 symlink 导致 args.path 与 entry 字符串不等 → seed 注入失败。
@@ -158,8 +196,17 @@ export function createMainPlugin(
         // 恢复 ?? 标记
         code = code.replace(/\x00FORCEINLINE\x00/g, "??");
         if (hasTemplateLiterals(code)) {
-          const result: any = await minifyHTMLLiterals(code);
-          if (result) code = result.code;
+          try {
+            const result: any = await minifyHTMLLiterals(code);
+            if (result) code = result.code;
+          } catch (e) {
+            // 模板压缩失败时降级：保留原码继续构建，只发警告。
+            console.warn(
+              `⚠️  minify-html-literals failed in ${args.path}: ${
+                (e as Error).message
+              } — keeping original code.`,
+            );
+          }
         }
         // 仅给当前 entry 注入上游 hash 种子，让 bun 计算 entry 产物文件名时
         // 把上游 hash 纳入指纹（external 默认不计入 hash）。
