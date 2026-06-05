@@ -8,8 +8,7 @@ console.log(TIMESTAMP);
 import { faker } from "@faker-js/faker@v7.1.0";
 console.log(faker);
 
-const myWorker = new Worker("./worker.ts");
+const myWorker = new Worker("/worker.ts");
 myWorker.onmessage = (e) => {
-  result.textContent = e.data;
-  console.log("Message received from worker");
+  console.log("Message received from worker", e.data);
 };

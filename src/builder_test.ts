@@ -473,6 +473,52 @@ describe("buildProject — dynamic-script reference", () => {
     const occ = bCode.split(a).length - 1;
     expect(occ).toBeGreaterThanOrEqual(2);
   });
+
+  test("absolute / external URIs in string literals are left untouched", async () => {
+    // 锁定语义：绝对 URI / 协议相对 URL / 根路径 / file:// 一律不参与改写
+    // —— 它们指向外部资源或运行时由 dev server / CDN 解析的路径，构建期不应介入。
+    await Bun.write(
+      join(tmpInlineSrc, "a.ts"),
+      `export const v = 1;`,
+    );
+    await Bun.write(
+      join(tmpInlineSrc, "main.ts"),
+      [
+        `import "./a.ts";`,
+        // 各种绝对 / 外部形态：构建后应原样保留
+        `const w1 = new Worker("https://cdn.example.com/worker.js");`,
+        `const w2 = new Worker("http://example.com/w.ts");`,
+        `const w3 = new Worker("//cdn.example.com/proto-rel.js");`,
+        `const w4 = new Worker("/abs/worker.ts");`,
+        `const w5 = new Worker("file:///tmp/local.js");`,
+        `const p1 = import("https://cdn.example.com/mod.js");`,
+        `console.log(w1, w2, w3, w4, w5, p1);`,
+      ].join("\n"),
+    );
+    await Bun.write(
+      join(tmpInlineSrc, "index.html"),
+      `<html><body><script type="module" src="./main.ts"></script></body></html>`,
+    );
+
+    await buildProject(tmpInlineSrc, tmpInlineOut);
+    const files = await Array.fromAsync(
+      new Bun.Glob("**/*.js").scan(tmpInlineOut),
+    );
+    const main = files.find((f) => /^main[.\-][0-9a-z]+\.js$/.test(f))!;
+    const code = await Bun.file(join(tmpInlineOut, main)).text();
+
+    // 全部绝对 URI 字面量必须原样保留
+    expect(code).toContain("https://cdn.example.com/worker.js");
+    expect(code).toContain("http://example.com/w.ts");
+    expect(code).toContain("//cdn.example.com/proto-rel.js");
+    expect(code).toContain("/abs/worker.ts");
+    expect(code).toContain("file:///tmp/local.js");
+    expect(code).toContain("https://cdn.example.com/mod.js");
+
+    // 不应把外部 .ts 当成本地源文件构建出对应产物
+    expect(files.some((f) => /^w[.\-][0-9a-z]+\.js$/.test(f))).toBe(false);
+    expect(files.some((f) => /^worker[.\-][0-9a-z]+\.js$/.test(f))).toBe(false);
+  });
 });
 
 describe("buildProject — import maps", () => {
