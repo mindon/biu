@@ -8,10 +8,6 @@
 # Environment overrides:
 #   BIU_INSTALL   Install root (default: $HOME/.biu)
 #   GITHUB        GitHub origin (default: https://github.com)
-#
-# biu is a single self-compiled binary, so this script just downloads
-# the prebuilt binary for your platform from GitHub Releases and
-# places it at $BIU_INSTALL/bin/biu.
 
 set -euo pipefail
 
@@ -60,10 +56,27 @@ success() {
 
 command -v curl >/dev/null ||
     error 'curl is required to install biu'
+command -v unzip >/dev/null ||
+    error 'unzip is required to install biu'
 
 if [[ $# -gt 1 ]]; then
     error 'Too many arguments. Only one optional version tag is allowed (e.g. "v1.1.9").'
 fi
+
+# --- detect libc (musl vs glibc) on Linux ---
+detect_libc() {
+    if [[ -f /lib/ld-musl-x86_64.so.1 || -f /lib/ld-musl-aarch64.so.1 ]]; then
+        echo musl
+        return
+    fi
+    if command -v ldd >/dev/null 2>&1; then
+        if ldd --version 2>&1 | grep -qi musl; then
+            echo musl
+            return
+        fi
+    fi
+    echo glibc
+}
 
 # --- detect target ---
 case $platform in
@@ -74,10 +87,11 @@ case $platform in
     target=darwin-aarch64
     ;;
 'Linux aarch64' | 'Linux arm64')
-    target=linux-aarch64
-    ;;
-'MINGW64'*'ARM64'* | 'MINGW64'*'aarch64'*)
-    target=windows-aarch64
+    if [[ $(detect_libc) = musl ]]; then
+        target=linux-aarch64-musl
+    else
+        target=linux-aarch64
+    fi
     ;;
 'MINGW64'*)
     target=windows-x64
@@ -86,7 +100,11 @@ case $platform in
     error 'biu is not supported on riscv64'
     ;;
 'Linux x86_64' | *)
-    target=linux-x64
+    if [[ $(detect_libc) = musl ]]; then
+        target=linux-x64-musl
+    else
+        target=linux-x64
+    fi
     ;;
 esac
 
@@ -101,15 +119,7 @@ fi
 GITHUB=${GITHUB-"https://github.com"}
 github_repo="$GITHUB/mindon/biu"
 
-# --- locate asset ---
-exe_name=biu
-asset_suffix=""
-case $target in
-windows-*)
-    asset_suffix=".exe"
-    ;;
-esac
-asset="biu-${target}${asset_suffix}"
+asset="biu-${target}.zip"
 
 if [[ $# = 0 ]]; then
     biu_uri="$github_repo/releases/latest/download/$asset"
@@ -130,9 +140,21 @@ if [[ ! -d $bin_dir ]]; then
         error "Failed to create install directory \"$bin_dir\""
 fi
 
-# --- download ---
-curl --fail --location --progress-bar --output "$exe" "$biu_uri" ||
+# --- download & extract ---
+tmpzip=$(mktemp -t biu-XXXXXX.zip 2>/dev/null || mktemp /tmp/biu-XXXXXX.zip)
+trap 'rm -f "$tmpzip"' EXIT
+
+curl --fail --location --progress-bar --output "$tmpzip" "$biu_uri" ||
     error "Failed to download biu from \"$biu_uri\""
+
+unzip -oqd "$bin_dir" "$tmpzip" ||
+    error 'Failed to extract biu'
+
+# Drop bundled docs out of $bin (they ship inside the zip alongside the binary).
+rm -f "$bin_dir/USAGE.md"
+
+[[ -f $exe ]] ||
+    error "biu binary not found in archive (expected $exe)"
 
 chmod +x "$exe" ||
     error 'Failed to set permissions on biu executable'

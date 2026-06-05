@@ -42,11 +42,16 @@ if ($WinVer.Major -lt 10 -or ($WinVer.Major -eq 10 -and $WinVer.Build -lt $MinBu
 $ErrorActionPreference = "Stop"
 
 # ---- arch / target ----
+# Bun does not currently provide a native windows-arm64 build, so ARM64
+# Windows is served the x64 binary (runs under emulation on Win11 ARM64).
 $Arch = $env:PROCESSOR_ARCHITECTURE
 if ($env:PROCESSOR_ARCHITEW6432) { $Arch = $env:PROCESSOR_ARCHITEW6432 }
 switch ($Arch) {
   "AMD64" { $Target = "windows-x64" }
-  "ARM64" { $Target = "windows-aarch64" }
+  "ARM64" {
+    Write-Warning "No native ARM64 build of biu yet; installing windows-x64 (will run under emulation)."
+    $Target = "windows-x64"
+  }
   default {
     Write-Error "Unsupported architecture: $Arch (only AMD64 and ARM64 are supported)"
     exit 1
@@ -68,7 +73,7 @@ if (-not (Test-Path $BiuBin)) {
 # ---- resolve download URL ----
 if (-not $env:GITHUB) { $env:GITHUB = "https://github.com" }
 $GithubRepo = "$($env:GITHUB)/mindon/biu"
-$Asset = "biu-${Target}.exe"
+$Asset = "biu-${Target}.zip"
 
 if ($Version -eq "latest" -or [string]::IsNullOrEmpty($Version)) {
   $Uri = "${GithubRepo}/releases/latest/download/${Asset}"
@@ -79,24 +84,47 @@ if ($Version -eq "latest" -or [string]::IsNullOrEmpty($Version)) {
 Write-Output "Downloading biu from ${Uri}"
 
 # ---- download ----
-$null = New-Item -ItemType File -Force -Path $BiuExe
+$ZipPath = Join-Path ([System.IO.Path]::GetTempPath()) "biu-$([System.Guid]::NewGuid().ToString()).zip"
 try {
   if (-not $DownloadWithoutCurl -and (Get-Command curl.exe -ErrorAction SilentlyContinue)) {
-    & curl.exe "-#SfLo" "$BiuExe" "$Uri"
+    & curl.exe "-#SfLo" "$ZipPath" "$Uri"
     if ($LASTEXITCODE -ne 0) { throw "curl.exe exit code $LASTEXITCODE" }
   } else {
-    Invoke-RestMethod -Uri $Uri -OutFile $BiuExe -UseBasicParsing
+    Invoke-RestMethod -Uri $Uri -OutFile $ZipPath -UseBasicParsing
   }
 } catch {
   Write-Output "Download failed: $_"
   Write-Output ""
   Write-Output "If this download is failing, please open an issue:"
   Write-Output "  https://github.com/mindon/biu/issues/new"
+  if (Test-Path $ZipPath) { Remove-Item $ZipPath -Force -ErrorAction SilentlyContinue }
   exit 1
 }
 
-if (-not (Test-Path $BiuExe) -or ((Get-Item $BiuExe).Length -lt 1024)) {
-  Write-Error "Downloaded file at $BiuExe is missing or too small. Aborting."
+if (-not (Test-Path $ZipPath) -or ((Get-Item $ZipPath).Length -lt 1024)) {
+  Write-Error "Downloaded file at $ZipPath is missing or too small. Aborting."
+  exit 1
+}
+
+# ---- extract ----
+try {
+  # Remove any previous binary in-place; Expand-Archive's -Force overwrites entries.
+  if (Test-Path $BiuExe) { Remove-Item $BiuExe -Force }
+  Expand-Archive -LiteralPath $ZipPath -DestinationPath $BiuBin -Force
+} catch {
+  Write-Error "Failed to extract archive: $_"
+  Remove-Item $ZipPath -Force -ErrorAction SilentlyContinue
+  exit 1
+} finally {
+  Remove-Item $ZipPath -Force -ErrorAction SilentlyContinue
+}
+
+# Drop bundled docs out of $bin (they ship inside the zip alongside the binary).
+$BundledDoc = Join-Path $BiuBin "USAGE.md"
+if (Test-Path $BundledDoc) { Remove-Item $BundledDoc -Force -ErrorAction SilentlyContinue }
+
+if (-not (Test-Path $BiuExe)) {
+  Write-Error "biu.exe was not found in archive at $BiuExe"
   exit 1
 }
 

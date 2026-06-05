@@ -97,21 +97,34 @@ curl -fsSL https://raw.githubusercontent.com/mindon/biu/main/install.sh | bash
 powershell -c "irm https://raw.githubusercontent.com/mindon/biu/main/install.ps1 | iex"
 ```
 
-The installers download `biu-<target>` (or `biu-<target>.exe` on Windows) into
-`$BIU_INSTALL/bin` (default `~/.biu/bin` / `%USERPROFILE%\.biu\bin`) and add it
-to your `PATH`. Supported targets:
+The installers download `biu-<target>.zip` from GitHub Releases, extract the
+`biu` (or `biu.exe`) binary into `$BIU_INSTALL/bin` (default `~/.biu/bin` /
+`%USERPROFILE%\.biu\bin`) and add it to your `PATH`. Supported targets:
 
-| Target            | Asset name                  |
-| ----------------- | --------------------------- |
-| `darwin-x64`      | `biu-darwin-x64`            |
-| `darwin-aarch64`  | `biu-darwin-aarch64`        |
-| `linux-x64`       | `biu-linux-x64`             |
-| `linux-aarch64`   | `biu-linux-aarch64`         |
-| `windows-x64`     | `biu-windows-x64.exe`       |
-| `windows-aarch64` | `biu-windows-aarch64.exe`   |
+| Target               | Asset name                    |
+| -------------------- | ----------------------------- |
+| `darwin-x64`         | `biu-darwin-x64.zip`          |
+| `darwin-aarch64`     | `biu-darwin-aarch64.zip`      |
+| `linux-x64`          | `biu-linux-x64.zip`           |
+| `linux-aarch64`      | `biu-linux-aarch64.zip`       |
+| `linux-x64-musl`     | `biu-linux-x64-musl.zip`      |
+| `linux-aarch64-musl` | `biu-linux-aarch64-musl.zip`  |
+| `windows-x64`        | `biu-windows-x64.zip`         |
+
+> Each zip ships the `biu` binary plus `USAGE.md`. Linux musl variants are
+> auto-detected (Alpine, etc.). Windows ARM64 falls back to `windows-x64`
+> under emulation since Bun does not yet provide a native ARM64 build.
 
 Override defaults via env vars: `BIU_INSTALL` (install root) or `GITHUB`
 (GitHub origin, useful for proxy mirrors).
+
+Releases are produced by the [`Release` GitHub Actions workflow](.github/workflows/release.yml)
+on every `v*` tag — push a tag to trigger it:
+
+```bash
+git tag v1.1.9
+git push origin v1.1.9
+```
 
 ### Build from source
 
