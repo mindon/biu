@@ -16,3 +16,6 @@ myWorker.onmessage = (e) => {
 };
 
 import "/simple.js";
+
+// import "./not-exists.ts";
+// import "/not-exists.js";

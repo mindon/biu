@@ -6,7 +6,12 @@ import { mkdir, unlink } from "node:fs/promises";
 import { basename, dirname, extname, join, relative, resolve } from "node:path";
 
 import { ASSET_EXTS, MANAGED_EXTS, VERSION } from "./constants.ts";
-import { hashAssetCached, resetAssetHashCache, scan } from "./utils.ts";
+import {
+  hashAssetCached,
+  resetAssetHashCache,
+  scan,
+  stripJsComments,
+} from "./utils.ts";
 import { autoInstallDeps } from "./deps.ts";
 import type { DependsMode } from "./cli.ts";
 import { processStyleFiles } from "./styles.ts";
@@ -64,7 +69,7 @@ function createFileScanner(jsFileSet: Set<string>) {
       if (!existsSync(file)) {
         return { imports: [], assetRefs: [] };
       }
-      const code = await Bun.file(file).text();
+      const code = stripJsComments(await Bun.file(file).text());
       const dir = dirname(file);
 
       const imports: FileScan["imports"] = [];
@@ -1189,7 +1194,7 @@ export async function buildProject(
         /["'`](\/[A-Za-z0-9_./~@-][^"'`\s?#]*)(?:[?#][^"'`]*)?["'`]/g;
       const seenRootRef = new Set<string>();
       for (const file of jsFiles) {
-        const code = await Bun.file(file).text();
+        const code = stripJsComments(await Bun.file(file).text());
         for (const m of code.matchAll(ROOT_REF_RE)) {
           const ref = m[1];
           // 过滤明显非资源的文本：必须有扩展名或目录形式，且不是双斜杠开头
