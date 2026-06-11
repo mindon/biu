@@ -39,12 +39,47 @@ function setupRootAbsoluteExternals(
   });
 }
 
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * 由 import map 的 specifier 集合构造一个**精确的** onResolve filter。
+ *
+ * 关键：绝不能用 match-all 的 filter（匹配任意路径）。即使回调对绝大多数
+ * 路径返回 undefined，只要注册了 catch-all 的 JS onResolve，Bun 就会把
+ * 每一个模块解析都绕行到 JS 插件路径，从而绕过原生解析器对 re-export 与
+ * sideEffects 的优化。对 echarts 这类大量内部 re-export 的包，会导致
+ * tree-shaking 错误地丢弃某些 install 函数的定义、却保留其引用，产物
+ * 运行期报 "ReferenceError: EH is not defined"（产物体积也异常变小）。
+ *
+ * 因此这里把 filter 收窄为"只可能命中 import map key 的 specifier"：
+ *   - 以斜杠结尾的 key（前缀映射）→ 锚定到 key 起始
+ *   - 精确 key → 锚定到 key 起始并允许其后紧跟 ?query / #hash
+ * echarts/core、zrender/... 等内部裸 specifier 不会命中该 filter，
+ * 于是仍走 Bun 原生解析，正常 bundle。
+ */
+export function buildImportMapFilter(
+  importMapSpecifiers: ImportMapSpecifiers,
+): RegExp | null {
+  const parts: string[] = [];
+  for (const key of importMapSpecifiers) {
+    if (!key) continue;
+    const esc = escapeRegExp(key);
+    parts.push(key.endsWith("/") ? esc : `${esc}(?:$|[?#])`);
+  }
+  if (parts.length === 0) return null;
+  return new RegExp(`^(?:${parts.join("|")})`);
+}
+
 function setupImportMapExternals(
   builder: Parameters<Plugin["setup"]>[0],
   importMapSpecifiers?: ImportMapSpecifiers,
 ): void {
   if (!importMapSpecifiers || importMapSpecifiers.size === 0) return;
-  builder.onResolve({ filter: /.*/ }, (args) => {
+  const filter = buildImportMapFilter(importMapSpecifiers);
+  if (!filter) return;
+  builder.onResolve({ filter }, (args) => {
     if (
       isBareSpecifier(args.path) &&
       isImportMapMapped(args.path, importMapSpecifiers)
