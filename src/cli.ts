@@ -34,6 +34,7 @@ export interface CliArgs {
   cdnCacheDir?: string | null;
   /** When true, never hit network — only serve from cache. */
   offline?: boolean;
+  rebiuing?: boolean;
 }
 
 /** 解析命令行参数 */
@@ -59,6 +60,7 @@ export function parseArgs(): CliArgs {
   let forceWrite = false;
   let cdnCacheDir: string | null = null;
   let offline = false;
+  let rebiuing = false;
 
   const positional: string[] = [];
   for (let i = 0; i < args.length; i++) {
@@ -102,6 +104,9 @@ export function parseArgs(): CliArgs {
         break;
       case "--force":
         forceWrite = true;
+        break;
+      case "--rebiu":
+        rebiuing = true;
         break;
       case "--static":
         staticDir = args[++i] ?? "./static";
@@ -151,6 +156,7 @@ export function parseArgs(): CliArgs {
     backendStyle,
     cdnCacheDir: cdnCacheDir ? resolve(cdnCacheDir) : null,
     offline,
+    rebiuing,
   };
 }
 

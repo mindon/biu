@@ -639,6 +639,20 @@ async function installPackages(
   // 安装成功后更新缓存
   const depsHash = await computeDepsHash(jsFiles, allPkgs);
   await writeCacheHash(installDir, depsHash);
+  const { argv, execPath } = process;
+  const rebiuFlag = "--rebiu";
+  if (missing.length > 0 && !argv.includes(rebiuFlag)) {
+    console.log("RE-BIU-ING...\n");
+    const proc = Bun.spawn([execPath, ...argv.slice(2), rebiuFlag], {
+      cwd: process.cwd(),
+      stdout: "inherit",
+      stderr: "inherit",
+      stdin: "inherit",
+      detached: true,
+    });
+    const exitCode = await proc.exited;
+    process.exit(exitCode);
+  }
   return missing;
 }
 

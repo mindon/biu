@@ -33,6 +33,7 @@ async function run() {
     backendStyle,
     cdnCacheDir,
     offline,
+    rebiuing,
   } = parseArgs();
 
   if (version) {
@@ -40,7 +41,7 @@ async function run() {
     if (usage) console.log(usage);
     return;
   }
-  console.log(`\n${VERSION}\n`);
+  if (!rebiuing) console.log(`\n${VERSION}\n`);
 
   // --build 模式：自编译为独立二进制
   if (biu) {
@@ -79,11 +80,11 @@ async function run() {
     process.exit(exitCode);
   }
 
-  console.log(`-- Working directory: ${cwd} --\n`);
+  if (!rebiuing) console.log(`-- Working directory: ${cwd} --\n`);
 
   /** 执行完整构建（含静态目录复制） */
   async function fullBuild(staticMode?: string) {
-    if (staticDir && existsSync(staticDir)) {
+    if (!rebiuing && staticDir && existsSync(staticDir)) {
       await copyStaticDir(staticDir, outDir, cwd);
     }
     if (staticMode === "static") return;
