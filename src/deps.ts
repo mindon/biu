@@ -504,18 +504,23 @@ export async function autoInstallDeps(
  * 通过执行 `bun --version` 探测；任意异常或非 0 退出码均视为不可用。
  * 结果缓存到模块作用域，避免重复探测。
  */
-let _bunAvailable: boolean | undefined;
-async function isBunAvailable(): Promise<boolean> {
+let _bunAvailable: string | undefined;
+async function isBunAvailable(tryPath?: string): Promise<string> {
   if (_bunAvailable !== undefined) return _bunAvailable;
   try {
-    const proc = Bun.spawn(["bun", "--version"], {
+    if (!tryPath) tryPath = "bun";
+    const proc = Bun.spawn([tryPath, "--version"], {
       stdout: "ignore",
       stderr: "ignore",
     });
     const code = await proc.exited;
-    _bunAvailable = code === 0;
+    _bunAvailable = code === 0 ? tryPath : "";
   } catch {
-    _bunAvailable = false;
+    if (tryPath == "bun") {
+      _bunAvailable = await isBunAvailable("~/.bun/bin/bun");
+    } else {
+      _bunAvailable = "";
+    }
   }
   return _bunAvailable;
 }
@@ -579,9 +584,8 @@ async function tryInstallBun(): Promise<boolean> {
   }
 
   // 重新探测
-  _bunAvailable = undefined;
-  const ok = await isBunAvailable();
-  if (ok) {
+  _bunAvailable = await isBunAvailable();
+  if (_bunAvailable) {
     console.log(`✅ Bun installed and ready.\n`);
   } else {
     console.error(
@@ -589,7 +593,7 @@ async function tryInstallBun(): Promise<boolean> {
         `   You may need to restart your shell, or add Bun's bin directory to PATH manually.`,
     );
   }
-  return ok;
+  return _bunAvailable?.length > 0 ? true : false;
 }
 
 /**
@@ -622,7 +626,7 @@ async function installPackages(
     }
   }
 
-  const proc = Bun.spawn(["bun", "add", ...missing], {
+  const proc = Bun.spawn([_bunAvailable || "bun", "add", ...missing], {
     cwd: installDir,
     stdout: "inherit",
     stderr: "inherit",
