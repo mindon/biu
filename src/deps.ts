@@ -505,24 +505,44 @@ export async function autoInstallDeps(
  * 结果缓存到模块作用域，避免重复探测。
  */
 let _bunAvailable: string | undefined;
-async function isBunAvailable(tryPath?: string): Promise<string> {
+async function isBunAvailable(tryBunPath?: string): Promise<string> {
   if (_bunAvailable !== undefined) return _bunAvailable;
   try {
-    if (!tryPath) tryPath = "bun";
-    const proc = Bun.spawn([tryPath, "--version"], {
+    if (!tryBunPath) {
+      const home = process.env.HOME || process.env.USERPROFILE || "";
+      tryBunPath = home ? `${home}/.bun/bin/bun` : "bun";
+    }
+    const proc = Bun.spawn([tryBunPath, "--version"], {
       stdout: "ignore",
       stderr: "ignore",
     });
     const code = await proc.exited;
-    _bunAvailable = code === 0 ? tryPath : "";
-  } catch {
-    if (tryPath == "bun") {
-      _bunAvailable = await isBunAvailable("~/.bun/bin/bun");
+    _bunAvailable = code === 0 ? tryBunPath : "";
+  } catch (err) {
+    if (tryBunPath !== "bun") {
+      _bunAvailable = await isBunAvailable("bun");
     } else {
       _bunAvailable = "";
     }
   }
   return _bunAvailable;
+}
+
+async function rebiu(tag: string) {
+  const { argv, execPath } = process;
+  const flag = `--rebiu-${tag}`;
+  if (argv.includes(flag)) return false;
+  console.log(`\nRE-BIU-ING for ${tag}...\n`);
+  const proc = Bun.spawn([execPath, ...argv.slice(2), flag], {
+    cwd: process.cwd(),
+    stdout: "inherit",
+    stderr: "inherit",
+    stdin: "inherit",
+    detached: true,
+  });
+  const exitCode = await proc.exited;
+  process.exit(exitCode);
+  return exitCode;
 }
 
 /**
@@ -569,31 +589,7 @@ async function tryInstallBun(): Promise<boolean> {
     console.error(`❌ Failed to launch Bun installer:`, err);
     return false;
   }
-
-  // 将默认 bun 安装目录追加到 PATH 以便当前进程能立刻使用
-  const home = process.env.HOME || process.env.USERPROFILE || "";
-  if (home) {
-    const bunBin = platform === "win32"
-      ? `${home}\\.bun\\bin`
-      : `${home}/.bun/bin`;
-    const sep = platform === "win32" ? ";" : ":";
-    const currentPath = process.env.PATH || "";
-    if (!currentPath.split(sep).includes(bunBin)) {
-      process.env.PATH = `${bunBin}${sep}${currentPath}`;
-    }
-  }
-
-  // 重新探测
-  _bunAvailable = await isBunAvailable();
-  if (_bunAvailable) {
-    console.log(`✅ Bun installed and ready.\n`);
-  } else {
-    console.error(
-      `❌ Bun installer finished but \`bun\` is still not available in PATH.\n` +
-        `   You may need to restart your shell, or add Bun's bin directory to PATH manually.`,
-    );
-  }
-  return _bunAvailable?.length > 0 ? true : false;
+  return await rebiu("bun") === 0;
 }
 
 /**
@@ -643,19 +639,8 @@ async function installPackages(
   // 安装成功后更新缓存
   const depsHash = await computeDepsHash(jsFiles, allPkgs);
   await writeCacheHash(installDir, depsHash);
-  const { argv, execPath } = process;
-  const rebiuFlag = "--rebiu";
-  if (missing.length > 0 && !argv.includes(rebiuFlag)) {
-    console.log("RE-BIU-ING...\n");
-    const proc = Bun.spawn([execPath, ...argv.slice(2), rebiuFlag], {
-      cwd: process.cwd(),
-      stdout: "inherit",
-      stderr: "inherit",
-      stdin: "inherit",
-      detached: true,
-    });
-    const exitCode = await proc.exited;
-    process.exit(exitCode);
+  if (missing.length > 0) {
+    await rebiu("deps");
   }
   return missing;
 }
