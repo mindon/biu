@@ -476,6 +476,121 @@ describe("buildProject — dynamic-script reference", () => {
     expect(occ).toBeGreaterThanOrEqual(2);
   });
 
+  test("string-literal ref with ?query / #hash suffix is rewritten and suffix preserved", async () => {
+    // 场景：new URL("./a.ts?world=123") —— 路径后带 query 后缀。
+    // 期望：改写为 "./a.<hash>.js?world=123"，后缀原样保留；
+    //       且 a.ts 改动时 b 产物 hash 跟随变化。
+    await Bun.write(
+      join(tmpInlineSrc, "a.ts"),
+      `export const v = "Q_V1";`,
+    );
+    await Bun.write(
+      join(tmpInlineSrc, "b.ts"),
+      `const u1 = new URL("./a.ts?world=123", import.meta.url);\n` +
+        `const u2 = new URL("./a.js#frag", import.meta.url);\n` +
+        `console.log(u1, u2);`,
+    );
+    await Bun.write(
+      join(tmpInlineSrc, "index.html"),
+      `<html><body>` +
+        `<script type="module" src="./a.ts"></script>` +
+        `<script type="module" src="./b.ts"></script>` +
+        `</body></html>`,
+    );
+
+    await buildProject(tmpInlineSrc, tmpInlineOut);
+    const files1 = await Array.fromAsync(
+      new Bun.Glob("**/*.js").scan(tmpInlineOut),
+    );
+    const a1 = files1.find((f) => /^a[.\-][0-9a-z]+\.js$/.test(f))!;
+    const b1 = files1.find((f) => /^b[.\-][0-9a-z]+\.js$/.test(f))!;
+    expect(a1).toBeDefined();
+    expect(b1).toBeDefined();
+
+    const b1Code = await Bun.file(join(tmpInlineOut, b1)).text();
+    // 原始裸 .ts/.js 引用不应再保留
+    expect(b1Code).not.toContain("./a.ts?world=123");
+    expect(b1Code).not.toContain("./a.js#frag");
+    // 应改写为带 hash 产物名，且 query / hash 后缀原样保留
+    expect(b1Code).toContain(`${a1}?world=123`);
+    expect(b1Code).toContain(`${a1}#frag`);
+
+    // 修改 a.ts → b 产物 hash 必须跟随变化（内容指纹纳入 query 引用的 a.ts）
+    await Bun.write(
+      join(tmpInlineSrc, "a.ts"),
+      `export const v = "Q_V2_totally_different_content_for_hash";`,
+    );
+    await buildProject(tmpInlineSrc, tmpInlineOut);
+    const files2 = await Array.fromAsync(
+      new Bun.Glob("**/*.js").scan(tmpInlineOut),
+    );
+    const a2 = files2.find((f) => /^a[.\-][0-9a-z]+\.js$/.test(f))!;
+    const b2 = files2.find((f) => /^b[.\-][0-9a-z]+\.js$/.test(f))!;
+    expect(a2).not.toBe(a1);
+    expect(b2).not.toBe(b1);
+    const b2Code = await Bun.file(join(tmpInlineOut, b2)).text();
+    // b2 内部指向新的 a2（带后缀），不再含旧 a1
+    expect(b2Code).toContain(`${a2}?world=123`);
+    expect(b2Code).not.toContain(a1);
+  });
+
+  test("transitive dep change of a string-referenced module rebusts the referrer's hash", async () => {
+    // 场景：b.ts 通过 new URL("./a.ts") 字符串引用 module a；
+    //       而 a.ts 自身 import "./dep.ts"（dep 也是独立 module 产物）。
+    // 期望：改 dep.ts（a 的传递依赖）→ a 产物 hash 变 → b 产物 hash 也必须变
+    //       （否则 b 内容改写指向新 a、但文件名不变 → 缓存失效失灵）。
+    await Bun.write(
+      join(tmpInlineSrc, "dep.ts"),
+      `export const D = "DEP_V1";`,
+    );
+    await Bun.write(
+      join(tmpInlineSrc, "a.ts"),
+      `import { D } from "./dep.ts";\nexport const A = "A_" + D;`,
+    );
+    await Bun.write(
+      join(tmpInlineSrc, "b.ts"),
+      `const u = new URL("./a.ts", import.meta.url);\nconsole.log(u);`,
+    );
+    await Bun.write(
+      join(tmpInlineSrc, "index.html"),
+      `<html><body>` +
+        `<script type="module" src="./a.ts"></script>` +
+        `<script type="module" src="./b.ts"></script>` +
+        `</body></html>`,
+    );
+
+    await buildProject(tmpInlineSrc, tmpInlineOut);
+    const files1 = await Array.fromAsync(
+      new Bun.Glob("**/*.js").scan(tmpInlineOut),
+    );
+    const a1 = files1.find((f) => /^a[.\-][0-9a-z]+\.js$/.test(f))!;
+    const b1 = files1.find((f) => /^b[.\-][0-9a-z]+\.js$/.test(f))!;
+    expect(a1).toBeDefined();
+    expect(b1).toBeDefined();
+    const b1Code = await Bun.file(join(tmpInlineOut, b1)).text();
+    expect(b1Code).toContain(a1); // b 指向 a 的当前产物名
+
+    // 仅改 a 的传递依赖 dep.ts（a.ts / b.ts 源码均未变）
+    await Bun.write(
+      join(tmpInlineSrc, "dep.ts"),
+      `export const D = "DEP_V2_totally_different_content_for_hash";`,
+    );
+    await buildProject(tmpInlineSrc, tmpInlineOut);
+    const files2 = await Array.fromAsync(
+      new Bun.Glob("**/*.js").scan(tmpInlineOut),
+    );
+    const a2 = files2.find((f) => /^a[.\-][0-9a-z]+\.js$/.test(f))!;
+    const b2 = files2.find((f) => /^b[.\-][0-9a-z]+\.js$/.test(f))!;
+    // a 产物 hash 变（其传递依赖 dep 变了）
+    expect(a2).not.toBe(a1);
+    // 关键断言：b 产物文件名也必须变（修复前 b 文件名不变 → 缓存失效失灵）
+    expect(b2).not.toBe(b1);
+    // 且 b2 指向新 a2，不再含旧 a1
+    const b2Code = await Bun.file(join(tmpInlineOut, b2)).text();
+    expect(b2Code).toContain(a2);
+    expect(b2Code).not.toContain(a1);
+  });
+
   test("string-literal worker refs in inlined transit modules are rewritten with original path shape", async () => {
     // 场景：main.ts → import "./hey/auto-inline.ts"（中转，被内联）
     //       auto-inline.ts → new Worker("./world2.ts")（按它自己的目录写的相对路径）

@@ -52,8 +52,13 @@ const FILE_IMPORT_TS_RE =
 // 模式（如 `s.src = "./a.js"`、`new Worker("./a.ts")`、`loadScript("./a.js")`），
 // 这些不会出现在 import/from 里，但其源文件改动应让引用方产物 hash 变化，
 // 否则下游产物文件名不变 → updateJsImports 不会重写 → 浏览器请求旧 hash 404。
+// 允许路径后带 ?query / #hash 后缀（如 `new URL("./a.ts?world=123")`）：
+//   - group 1 仅捕获主路径（不含后缀），交由 resolve() 解析为源文件；
+//   - 末尾 `(?:[?#]...)?` 吞掉可空的 query/hash，否则带后缀的引用整体匹配
+//     失败 → 该源文件不会被登记为引用方的资源依赖 → 引用方产物 hash 不随
+//     其改动变化（下游缓存失效失灵）。
 const FILE_STRING_REF_RE =
-  /["'`](\.{1,2}\/[^"'`\s]+?\.(?:png|jpe?g|gif|svg|webp|avif|bmp|ico|woff2?|ttf|otf|eot|mp4|webm|ogg|mp3|wav|json|css|scss|sass|[mc]?[jt]s))["'`]/gi;
+  /["'`](\.{1,2}\/[^"'`\s?#]+?\.(?:png|jpe?g|gif|svg|webp|avif|bmp|ico|woff2?|ttf|otf|eot|mp4|webm|ogg|mp3|wav|json|css|scss|sass|[mc]?[jt]s))(?:[?#][^"'`\s]*)?["'`]/gi;
 
 /**
  * 创建文件扫描器：统一一次读盘 + 一次正则扫描，结果缓存复用。
@@ -444,12 +449,16 @@ async function updateJsImports(
               ) {
                 relOutput = `./${relOutput}`;
               }
+              // 允许路径后紧跟 ?query / #hash 后缀（如
+              //   `new URL("./hey/hello.ts?world=123")`）。
+              // 后缀需原样保留：替换为 `./hey/hello.<hash>.js?world=123`。
+              // 不允许后缀会导致带 query 的引用整体匹配失败、不被改写。
               const newCode = code.replace(
                 new RegExp(
-                  `(["'\`])(?:\\.\\/)?${escapedRelPath}(["'\`])`,
+                  `(["'\`])(?:\\.\\/)?${escapedRelPath}((?:[?#][^"'\`]*)?)(["'\`])`,
                   "g",
                 ),
-                (match, q1, q2, offset) => {
+                (match, q1, suffix, q2, offset) => {
                   if (
                     offset > 5 &&
                     /data\s*:[^"'`]*$/i.test(
@@ -462,7 +471,7 @@ async function updateJsImports(
                   if (/(?:import|from)\s*$/i.test(before)) {
                     return match;
                   }
-                  return `${q1}${relOutput}${q2}`;
+                  return `${q1}${relOutput}${suffix}${q2}`;
                 },
               );
               if (newCode !== code) {
@@ -753,47 +762,6 @@ export async function buildProject(
     }),
   );
 
-  // 拓扑排序（Kahn）：被依赖的排前面；环检测时降级回原顺序
-  const sortedModules: string[] = [];
-  {
-    const indeg = new Map<string, number>();
-    const reverse = new Map<string, Set<string>>(); // dep → 依赖它的 importer 集合
-    for (const file of moduleEntries) {
-      indeg.set(file, 0);
-      reverse.set(file, new Set());
-    }
-    for (const [file, deps] of moduleDeps) {
-      indeg.set(file, deps.size);
-      for (const d of deps) {
-        reverse.get(d)!.add(file);
-      }
-    }
-    const queue: string[] = [];
-    for (const [file, n] of indeg) if (n === 0) queue.push(file);
-    while (queue.length) {
-      const f = queue.shift()!;
-      sortedModules.push(f);
-      for (const importer of reverse.get(f)!) {
-        const n = (indeg.get(importer) ?? 0) - 1;
-        indeg.set(importer, n);
-        if (n === 0) queue.push(importer);
-      }
-    }
-    if (sortedModules.length !== moduleEntries.length) {
-      // 检测到循环依赖：回退到原顺序
-      console.warn(
-        `⚠️  Circular dependency detected among module entries; ` +
-          `falling back to original build order.`,
-      );
-      sortedModules.length = 0;
-      sortedModules.push(...moduleEntries);
-    }
-  }
-
-  // 已构建产物映射（src 绝对路径 → 产物绝对路径），按拓扑顺序累积；
-  // createMainPlugin 通过它把 external 引用写成上游真实文件名（含 hash）
-  const moduleOutputs = new Map<string, string>();
-
   // ── 预扫每个 module 源码中字符串引用的 asset / CSS 路径 ──
   // 目的：把这些被引用资源的源内容指纹也纳入 entryHashSeed，
   //   让 asset/CSS 改动 → entry 产物 hash 变 → 下游 HTML 自动刷新缓存。
@@ -838,6 +806,73 @@ export async function buildProject(
       }
     }),
   );
+
+  // 字符串字面量（如 `new URL("./hey/hello.ts")`）引用到的【module entry】
+  // 构成"产物级"依赖：被引用 module 的产物名（含 hash）会被 updateJsImports
+  // 改写进引用方产物内容。若不把它纳入【构建顺序 + hash 种子】，则当被引用
+  // module 的传递依赖（如 hello.ts → world.ts）改动时：被引用 module 产物 hash
+  // 变了，但引用方的 hash 种子只取被引用 module 的【源码】哈希（未变）→ 引用方
+  // 文件名不变 → 缓存失效失灵（产物内容改了但文件名没改、下游 HTML 不刷新）。
+  // 解决：把这些边并入拓扑图（被引用 module 先 build），并在种子里改用被引用
+  // module 的【产物 basename】（已递归编码其全部传递内容）。
+  const assetModuleDeps = new Map<string, Set<string>>();
+  for (const [file, refs] of moduleAssetRefs) {
+    const mods = new Set(
+      refs.filter((r) => moduleSet.has(r) && r !== file),
+    );
+    if (mods.size > 0) assetModuleDeps.set(file, mods);
+  }
+
+  // 合并 import 依赖 + 字符串引用(asset)依赖：拓扑排序与同层并发调度都以此为准，
+  // 确保被字符串引用的 module 也先于引用方 build（引用方种子才能取到其产物名）。
+  const combinedDeps = new Map<string, Set<string>>();
+  for (const file of moduleEntries) {
+    const s = new Set<string>(moduleDeps.get(file) ?? []);
+    const a = assetModuleDeps.get(file);
+    if (a) { for (const d of a) s.add(d); }
+    combinedDeps.set(file, s);
+  }
+
+  // 拓扑排序（Kahn）：被依赖的排前面；环检测时降级回原顺序
+  const sortedModules: string[] = [];
+  {
+    const indeg = new Map<string, number>();
+    const reverse = new Map<string, Set<string>>(); // dep → 依赖它的 importer 集合
+    for (const file of moduleEntries) {
+      indeg.set(file, 0);
+      reverse.set(file, new Set());
+    }
+    for (const [file, deps] of combinedDeps) {
+      indeg.set(file, deps.size);
+      for (const d of deps) {
+        reverse.get(d)!.add(file);
+      }
+    }
+    const queue: string[] = [];
+    for (const [file, n] of indeg) if (n === 0) queue.push(file);
+    while (queue.length) {
+      const f = queue.shift()!;
+      sortedModules.push(f);
+      for (const importer of reverse.get(f)!) {
+        const n = (indeg.get(importer) ?? 0) - 1;
+        indeg.set(importer, n);
+        if (n === 0) queue.push(importer);
+      }
+    }
+    if (sortedModules.length !== moduleEntries.length) {
+      // 检测到循环依赖：回退到原顺序
+      console.warn(
+        `⚠️  Circular dependency detected among module entries; ` +
+          `falling back to original build order.`,
+      );
+      sortedModules.length = 0;
+      sortedModules.push(...moduleEntries);
+    }
+  }
+
+  // 已构建产物映射（src 绝对路径 → 产物绝对路径），按拓扑顺序累积；
+  // createMainPlugin 通过它把 external 引用写成上游真实文件名（含 hash）
+  const moduleOutputs = new Map<string, string>();
 
   async function buildModules() {
     // 单 entry 构建逻辑（无副作用前提：每个 entry 只写自己 key 到 moduleOutputs/sourceToOutput）
@@ -891,6 +926,22 @@ export async function buildProject(
         );
         const aParts = aPartsRaw.filter((x): x is string => x !== null);
         if (aParts.length > 0) seedParts.push(`a:${aParts.join(",")}`);
+      }
+      // 字符串引用到的【module entry】：用其【产物 basename】作种子，
+      // 递归编码被引用 module 的全部传递内容（修复其传递依赖改动时引用方
+      // 文件名不更新、缓存失效失灵的问题）。拓扑排序已保证被引用 module 先
+      // build；个别因环未构建出来的跳过 —— 其源码哈希已由上面的 a: 段覆盖。
+      const assetMods = assetModuleDeps.get(file);
+      if (assetMods && assetMods.size > 0) {
+        const uParts: string[] = [];
+        for (const dep of assetMods) {
+          const out = moduleOutputs.get(dep);
+          if (out) uParts.push(basename(out));
+        }
+        if (uParts.length > 0) {
+          uParts.sort();
+          seedParts.push(`u:${uParts.join(",")}`);
+        }
       }
       const entryHashSeed = seedParts.length > 0
         ? seedParts.join("|")
@@ -966,7 +1017,7 @@ export async function buildProject(
       const layer: string[] = [];
       const rest: string[] = [];
       for (const f of pending) {
-        const deps = moduleDeps.get(f);
+        const deps = combinedDeps.get(f);
         if (!deps || deps.size === 0) {
           layer.push(f);
         } else {

@@ -26,3 +26,5 @@ export const demo = html`
     <b>world</b>
   </div>
 `;
+
+console.log(new URL("./hey/hello.ts?world=123", import.meta.url).searchParams);
