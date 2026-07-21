@@ -54,56 +54,45 @@ function restoreUrls(css: string, originals: string[]): string {
 }
 
 /**
- * 递归内联 CSS 中的 @import 语句，同时将被引入文件中的 url() 相对路径
- * 调整为相对于主文件的路径。这样后续 maskUrls 能遮蔽到所有 url()，
- * 避免 Bun bundler 自行处理并生成不一致的 hash 文件名。
+ * 与 maskUrls 同理：Bun.build 会尝试解析 CSS 中的 `@import "xxx.css"`，
+ * 在临时目录里找不到目标文件就会报 "could not resolve" 错误（或静默丢弃）。
+ * biu 希望**原样保留** @import（不内联，交给浏览器/部署环境按路径加载），
+ * 所以在 build 之前把 @import 的引用替换成一个 `https://` 假 URL —— Bun 对
+ * 外部 scheme 的 @import 会原样保留，不做文件系统解析 —— build 后再还原。
+ *
+ * 注意：本函数必须在 maskUrls 之前调用，避免 `@import url(...)` 里的 url()
+ * 被 maskUrls 先行遮蔽。
  */
-async function inlineImports(
-  css: string,
-  cssDir: string,
-  seen = new Set<string>(),
-): Promise<string> {
-  const importRegex =
-    /@import\s+(?:url\(\s*["']?([^"')]+)["']?\s*\)|["']([^"']+)["'])\s*;/g;
-  let result = css;
-  let match;
-  // 收集所有 import，从后往前替换以保持索引稳定
-  const imports: { start: number; end: number; spec: string }[] = [];
-  while ((match = importRegex.exec(css)) !== null) {
-    const spec = match[1] || match[2];
-    if (spec && !spec.startsWith("http://") && !spec.startsWith("https://")) {
-      imports.push({
-        start: match.index,
-        end: match.index + match[0].length,
-        spec,
-      });
-    }
-  }
-  // 从后往前替换
-  for (let i = imports.length - 1; i >= 0; i--) {
-    const { start, end, spec } = imports[i];
-    const importedPath = join(cssDir, spec);
-    if (seen.has(importedPath) || !existsSync(importedPath)) continue;
-    seen.add(importedPath);
-    const importedDir = dirname(importedPath);
-    let importedCss = await Bun.file(importedPath).text();
-    // 递归处理嵌套的 @import
-    importedCss = await inlineImports(importedCss, importedDir, seen);
-    // 调整 url() 相对路径：从 importedDir 相对改为 cssDir 相对
-    if (importedDir !== cssDir) {
-      importedCss = importedCss.replace(
-        /url\(\s*(?!["']?(?:data\s*:|https?:\/\/))([^)]+?)\s*\)/gi,
-        (_m, inner) => {
-          const trimmed = inner.trim().replace(/^["']|["']$/g, "");
-          const abs = join(importedDir, trimmed);
-          const rewritten = relative(cssDir, abs);
-          return `url("${rewritten}")`;
-        },
-      );
-    }
-    result = result.slice(0, start) + importedCss + result.slice(end);
-  }
-  return result;
+const IMPORT_PLACEHOLDER_PREFIX = "https://biu.invalid/import/";
+
+function maskImports(css: string): { masked: string; originals: string[] } {
+  const originals: string[] = [];
+  const masked = css.replace(
+    /@import\s+(url\(\s*["']?[^"')]+["']?\s*\)|["'][^"']+["'])/gi,
+    (match, spec) => {
+      // 提取实际引用内容，判断是否为外部 URL（外部的无需 mask，Bun 会保留）
+      const inner = String(spec)
+        .replace(/^url\(\s*/i, "")
+        .replace(/\s*\)$/, "")
+        .replace(/^["']|["']$/g, "");
+      if (/^https?:\/\//i.test(inner)) return match;
+      const idx = originals.length;
+      originals.push(spec);
+      return `@import "${IMPORT_PLACEHOLDER_PREFIX}${idx}"`;
+    },
+  );
+  return { masked, originals };
+}
+
+function restoreImports(css: string, originals: string[]): string {
+  const escPrefix = IMPORT_PLACEHOLDER_PREFIX.replace(
+    /[.*+?^${}()|[\]\\]/g,
+    "\\$&",
+  );
+  return css.replace(
+    new RegExp(`@import\\s+["']${escPrefix}(\\d+)["']`, "g"),
+    (_match, idx) => `@import ${originals[Number(idx)]}`,
+  );
 }
 
 /**
@@ -115,10 +104,13 @@ async function minifyCssViaBun(
   cssSource: string,
   sourceHint: string,
 ): Promise<string> {
-  const { masked, originals } = maskUrls(cssSource);
+  // 先遮蔽 @import（保留而非内联），再遮蔽 url()。顺序不能颠倒，
+  // 否则 `@import url(...)` 里的 url() 会被 maskUrls 抢先处理。
+  const importMask = maskImports(cssSource);
+  const { masked, originals } = maskUrls(importMask.masked);
 
-  // @import 已在 inlineImports() 中被完全内联，Bun.build 不再需要
-  // 解析相对路径，所以临时文件可以安全地放在系统临时目录。
+  // @import 与 url() 都已被替换成外部 https 占位符，Bun.build 不会再尝试
+  // 到文件系统解析它们，所以临时文件可以安全地放在系统临时目录。
   const tmpDir = join(tmpdir(), "biu-css");
   await mkdir(tmpDir, { recursive: true });
   const tmpFile = join(
@@ -144,7 +136,10 @@ async function minifyCssViaBun(
     // output matches the tight, single-line style previously produced by
     // clean-css.
     const minified = (await cssOutput.text()).replace(/\n+$/, "");
-    return restoreUrls(minified, originals);
+    return restoreImports(
+      restoreUrls(minified, originals),
+      importMask.originals,
+    );
   } finally {
     await rm(tmpFile, { force: true });
   }
@@ -155,18 +150,20 @@ async function minifyCssViaBun(
  *
  * - `.scss` / `.sass`：先用 sass 编译，再交给 Bun.build 压缩
  * - `.css`：直接读取源文件后交给 Bun.build 压缩
+ *
+ * 说明：CSS 中的原生 `@import "xxx.css"` 会被**原样保留**（不内联），
+ * 由 minifyCssViaBun 通过占位符绕过 Bun 的路径解析，避免 could-not-resolve。
+ * sass 对 `.css` 后缀的 @import 同样保留为原生 CSS @import。
  */
 export async function compileStyle(filePath: string): Promise<string> {
   const ext = extname(filePath).toLowerCase();
   let css: string;
   if (ext === ".scss" || ext === ".sass") {
-    // sass.compile 自身会处理 @import / @use
+    // sass.compile 自身会处理 SCSS 的 @import / @use（无 .css 后缀的会内联），
+    // 对 .css 后缀的 @import 则保留为原生 CSS @import。
     css = sass.compile(filePath).css;
   } else {
-    // 对纯 CSS，先递归内联 @import，使所有 url() 统一在主文件层面，
-    // 后续 maskUrls 才能完整遮蔽，避免 Bun bundler 生成不一致的 hash。
     css = await Bun.file(filePath).text();
-    css = await inlineImports(css, dirname(filePath));
   }
   return await minifyCssViaBun(css, filePath);
 }

@@ -134,3 +134,98 @@ describe("processStyleFiles", () => {
     expect(wrote).toBe(0);
   });
 });
+
+describe("CSS @import preservation", () => {
+  const base = join(tmpDir, "scss_import");
+  const srcDir = join(base, "src");
+  const outDir = join(base, "out");
+
+  test("preserves relative @import ./a.css in SCSS output (no resolve error)", async () => {
+    await mkdir(srcDir, { recursive: true });
+    // 注意：a.css 无需真实存在，@import 应原样保留、不做文件解析
+    await Bun.write(
+      join(srcDir, "main.scss"),
+      '@import "./a.css";\nbody { margin: 0; }\n',
+    );
+
+    try {
+      const result = await compileStyle(join(srcDir, "main.scss"));
+      expect(result).toContain('@import "./a.css"');
+      expect(result).toContain("margin:0");
+      // 不应内联，也不应因找不到文件而报错或丢弃
+      expect(result).not.toContain("color");
+    } finally {
+      await rm(base, { recursive: true, force: true });
+    }
+  });
+
+  test("preserves absolute @import /b.css in SCSS output", async () => {
+    await mkdir(srcDir, { recursive: true });
+    await Bun.write(
+      join(srcDir, "main.scss"),
+      '@import "/b.css";\np { font-size: 14px; }\n',
+    );
+
+    try {
+      const result = await compileStyle(join(srcDir, "main.scss"));
+      expect(result).toContain('@import "/b.css"');
+      expect(result).toContain("font-size:14px");
+    } finally {
+      await rm(base, { recursive: true, force: true });
+    }
+  });
+
+  test("preserves @import in plain CSS files", async () => {
+    await mkdir(srcDir, { recursive: true });
+    await Bun.write(
+      join(srcDir, "app.css"),
+      '@import "./reset.css";\ndiv { display: flex; }\n',
+    );
+
+    try {
+      const result = await compileStyle(join(srcDir, "app.css"));
+      expect(result).toContain('@import "./reset.css"');
+      expect(result).toContain("display:flex");
+    } finally {
+      await rm(base, { recursive: true, force: true });
+    }
+  });
+
+  test("preserves @import url(...) form", async () => {
+    await mkdir(srcDir, { recursive: true });
+    await Bun.write(
+      join(srcDir, "u.css"),
+      '@import url("./c.css");\nspan { color: red; }\n',
+    );
+
+    try {
+      const result = await compileStyle(join(srcDir, "u.css"));
+      expect(result).toContain('@import url("./c.css")');
+      expect(result).toContain("color:red");
+    } finally {
+      await rm(base, { recursive: true, force: true });
+    }
+  });
+
+  test("processStyleFiles keeps @import in output", async () => {
+    await mkdir(srcDir, { recursive: true });
+    await Bun.write(
+      join(srcDir, "theme.scss"),
+      '@import "/vars.css";\nbody { color: var(--c); }\n',
+    );
+
+    try {
+      const { map } = await processStyleFiles(
+        [join(srcDir, "theme.scss")],
+        srcDir,
+        outDir,
+      );
+      const outputPath = map.get(join(srcDir, "theme.scss"))!;
+      const content = await Bun.file(outputPath).text();
+      expect(content).toContain('@import "/vars.css"');
+      expect(content).toContain("color:var(--c)");
+    } finally {
+      await rm(base, { recursive: true, force: true });
+    }
+  });
+});
