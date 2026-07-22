@@ -50,7 +50,7 @@ async function run() {
       if (lstatSync(outFile)?.isDirectory()) {
         outFile = join(outFile, "biu");
       }
-    } catch {}
+    } catch { }
     const selfPath = resolve(import.meta.dir, "biu.ts");
     if (!existsSync(selfPath)) {
       console.error(`❌ Self-build failed: ${selfPath} not found`);
@@ -87,7 +87,6 @@ async function run() {
     if (!rebiuing && staticDir && existsSync(staticDir)) {
       await copyStaticDir(staticDir, outDir, cwd);
     }
-    if (staticMode === "static") return;
     await buildProject(
       srcDir,
       outDir,
