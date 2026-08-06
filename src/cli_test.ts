@@ -25,6 +25,7 @@ describe("parseArgs", () => {
       expect(result.servePort).toBeNull();
       expect(result.postBuildScript).toBeUndefined();
       expect(result.forceWrite).toBe(false);
+      expect(result.sourceMap).toBe(false);
     });
   });
 
@@ -148,6 +149,18 @@ describe("parseArgs", () => {
     withArgs(["--force"], () => {
       const result = parseArgs();
       expect(result.forceWrite).toBe(true);
+    });
+  });
+
+  test("--sourcemap enables external source maps", () => {
+    withArgs(["--sourcemap"], () => {
+      expect(parseArgs().sourceMap).toBe(true);
+    });
+  });
+
+  test("--source-map is accepted as an alias", () => {
+    withArgs(["--source-map"], () => {
+      expect(parseArgs().sourceMap).toBe(true);
     });
   });
 

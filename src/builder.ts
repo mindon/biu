@@ -309,7 +309,8 @@ async function updateJsImports(
   sourceToOutputAsset: Map<string, string>,
   extras: Record<string, string>,
   moduleInlineFiles?: Map<string, string[]>,
-) {
+): Promise<Set<string>> {
+  const changedOutputs = new Set<string>();
   // 构建产物路径 → 源文件路径的反向映射
   const outputToSource = new Map<string, string>();
   for (const [src, out] of sourceToOutput) {
@@ -484,9 +485,33 @@ async function updateJsImports(
 
         if (changed) {
           await Bun.write(output.path, code);
+          changedOutputs.add(output.path);
         }
       }),
   );
+  return changedOutputs;
+}
+
+/**
+ * 路径后处理会改变 Bun 生成映射所依据的字节位置；此时移除失效的 map 及其注释，
+ * 避免浏览器使用错误映射。未改写的脚本仍保留完整的外部 Source Map。
+ */
+async function removeInvalidSourceMaps(jsOutputs: Iterable<string>) {
+  await Promise.all(Array.from(jsOutputs, async (jsPath) => {
+    const mapPath = `${jsPath}.map`;
+    if (!existsSync(mapPath)) return;
+    const code = await Bun.file(jsPath).text();
+    const withoutSourceMap = code.replace(
+      /\n?\/\/# sourceMappingURL=[^\n]*(?:\n|$)/,
+      "\n",
+    );
+    await Promise.all([
+      withoutSourceMap === code
+        ? Promise.resolve()
+        : Bun.write(jsPath, withoutSourceMap),
+      unlink(mapPath).catch(() => undefined),
+    ]);
+  }));
 }
 
 /**
@@ -616,6 +641,7 @@ export async function buildProject(
   cdnCacheDir?: string | null,
   offline = false,
   cdnProxyFallback = false,
+  sourceMap = false,
 ) {
   const startTime = performance.now();
   // 清空跨构建的 asset hash 缓存（避免 watch / dev 模式下读到陈旧 hash）
@@ -967,10 +993,12 @@ export async function buildProject(
           minify: true,
           target: "browser",
           naming: "[name].[hash].js",
+          sourcemap: sourceMap ? "linked" : "none",
           plugins: [plugin],
         });
         for (const output of res.outputs) {
           allOutputs.push(output);
+          if (!output.path.endsWith(".js")) continue;
           sourceToOutput.set(file, output.path);
           moduleOutputs.set(file, output.path);
           jsWrote++;
@@ -987,22 +1015,42 @@ export async function buildProject(
           minify: true,
           target: "browser",
           naming: "[name].[hash].js",
+          sourcemap: sourceMap ? "linked" : "none",
           plugins: [plugin],
           writing: false,
         });
-        for (const output of res.outputs) {
+        const outputPaths = res.outputs.map((output) =>
+          join(moduleOutDir, basename(output.path))
+        );
+        const missingJsOutputs = new Set(
+          outputPaths.filter((outputPath) =>
+            outputPath.endsWith(".js") && !existsSync(outputPath)
+          ),
+        );
+        for (let index = 0; index < res.outputs.length; index++) {
+          const output = res.outputs[index];
           // output.path is relative (e.g. "./main.abc12345.js"),
           // resolve it against the intended outdir
-          const outputPath = join(moduleOutDir, basename(output.path));
-          if (!existsSync(outputPath)) {
+          const outputPath = outputPaths[index];
+          const isJs = outputPath.endsWith(".js");
+          const primaryJsPath = isJs ? outputPath : outputPath.slice(0, -4);
+          // 若主 JS 未变但其 map 曾因后处理被移除，不能重新发布一份与最终
+          // JS 字节位置不匹配的映射文件。
+          const wrote = isJs
+            ? missingJsOutputs.has(outputPath)
+            : missingJsOutputs.has(primaryJsPath) && !existsSync(outputPath);
+          if (wrote) {
             await mkdir(moduleOutDir, { recursive: true });
             await Bun.write(outputPath, output);
+          }
+          allOutputs.push({ path: outputPath });
+          if (!isJs) continue;
+          sourceToOutput.set(file, outputPath);
+          moduleOutputs.set(file, outputPath);
+          if (wrote) {
             jsWrote++;
             jsChanged.add(file);
           }
-          allOutputs.push({ path: outputPath });
-          sourceToOutput.set(file, outputPath);
-          moduleOutputs.set(file, outputPath);
         }
       }
     }
@@ -1097,7 +1145,7 @@ export async function buildProject(
   }
 
   // ── 并行阶段 2：CSS url() 替换 + JS import 路径替换 并行 ──
-  await Promise.all([
+  const [, rewrittenJsOutputs] = await Promise.all([
     updateCssUrls(sourceToOutputCss, sourceToOutputAsset),
     updateJsImports(
       allOutputs,
@@ -1109,6 +1157,7 @@ export async function buildProject(
       moduleInlineFiles,
     ),
   ]);
+  if (sourceMap) await removeInvalidSourceMaps(rewrittenJsOutputs);
 
   // ── 并行阶段 3：多个 HTML 文件并行处理引用替换 ──
   const htmlWrote = await processHtmlFiles(
@@ -1141,6 +1190,7 @@ export async function buildProject(
         pipe.manifest,
         cdnProxyFallback,
       );
+      if (sourceMap) await removeInvalidSourceMaps(rew.changedJs);
       cdnSummary = {
         discovered: pipe.discovered,
         cached: pipe.cached,
@@ -1313,7 +1363,7 @@ export async function buildProject(
       //   JS:        name.HASH.js     (e.g. main.s5aj6zwp.js)
       //   CSS/Asset: name-HASH.ext    (e.g. styles-d4496399.css, mindon-3dadbdab.png)
       //   hash 长度 6-32，字母数字
-      const HASH_DOT_RE = /\.[a-z0-9]{6,32}\.(js|mjs|css)$/i;
+      const HASH_DOT_RE = /\.[a-z0-9]{6,32}\.(?:js|mjs|css)(?:\.map)?$/i;
       const HASH_DASH_RE = /-[a-z0-9]{6,32}\.[a-z0-9]+$/i;
 
       const distFiles = await scan(outDir);

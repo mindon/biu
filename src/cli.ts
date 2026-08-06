@@ -25,6 +25,7 @@ export interface CliArgs {
   postBuildScript?: string;
   depends: DependsMode;
   forceWrite: boolean;
+  sourceMap: boolean;
   biu?: string;
   version?: string;
   usage?: string;
@@ -58,6 +59,7 @@ export function parseArgs(): CliArgs {
   let postBuildScript: string | undefined;
   let depends: DependsMode = { kind: "auto" };
   let forceWrite = false;
+  let sourceMap = false;
   let cdnCacheDir: string | null = null;
   let offline = false;
   let rebiuing = false;
@@ -104,6 +106,10 @@ export function parseArgs(): CliArgs {
         break;
       case "--force":
         forceWrite = true;
+        break;
+      case "--sourcemap":
+      case "--source-map":
+        sourceMap = true;
         break;
       case "--rebiu":
         rebiuing = true;
@@ -152,6 +158,7 @@ export function parseArgs(): CliArgs {
     postBuildScript,
     depends,
     forceWrite,
+    sourceMap,
     backendDir,
     backendStyle,
     cdnCacheDir: cdnCacheDir ? resolve(cdnCacheDir) : null,

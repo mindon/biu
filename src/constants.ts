@@ -21,6 +21,7 @@ Options:
                          <file>.txt      Record to <file>.txt as package,version lines
   --build [outfile]    Self-compile to binary (default: ./biu)
   --force              Force rewrite output files even if they already exist
+  --sourcemap          Emit external JavaScript source maps (*.js.map)
   --cdn-cache [dir]    Cache all referenced CDN URLs to local fs and rewrite
                        outputs to load them from <outDir>/cdn/. Default dir:
                        .biu-cache/cdn (persistent across builds).

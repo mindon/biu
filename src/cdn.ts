@@ -547,18 +547,19 @@ export async function rewriteCdnInOutputs(
   outDir: string,
   manifest: CdnManifest,
   proxyFallback: boolean,
-): Promise<{ html: number; css: number; js: number }> {
+): Promise<{ html: number; css: number; js: number; changedJs: string[] }> {
   if (Object.keys(manifest).length === 0) {
-    return { html: 0, css: 0, js: 0 };
+    return { html: 0, css: 0, js: 0, changedJs: [] };
   }
   const cdnDir = join(outDir, "cdn");
   const all = await scan(outDir);
+  const changedJs: string[] = [];
   let html = 0, css = 0, js = 0;
 
   await Promise.all(all.map(async (file) => {
     if (file.startsWith(cdnDir)) return; // skip the cache itself
     const ext = extname(file).toLowerCase();
-    if (![".html", ".htm", ".css", ".js", ".mjs", ".map"].includes(ext)) return;
+    if (![".html", ".htm", ".css", ".js", ".mjs"].includes(ext)) return;
 
     let content: string;
     try {
@@ -580,9 +581,12 @@ export async function rewriteCdnInOutputs(
       await Bun.write(file, rewritten);
       if (ext === ".html" || ext === ".htm") html++;
       else if (ext === ".css") css++;
-      else js++;
+      else {
+        js++;
+        changedJs.push(file);
+      }
     }
   }));
 
-  return { html, css, js };
+  return { html, css, js, changedJs };
 }

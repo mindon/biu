@@ -8,6 +8,8 @@ const demoSrc = resolve(import.meta.dir, "../demo-project/src");
 const tmpOut = join(import.meta.dir, "__test_builder_out__");
 const tmpInlineSrc = join(import.meta.dir, "__test_inline_src__");
 const tmpInlineOut = join(import.meta.dir, "__test_inline_out__");
+const tmpSourceMapSrc = join(import.meta.dir, "__test_sourcemap_src__");
+const tmpSourceMapOut = join(import.meta.dir, "__test_sourcemap_out__");
 
 describe("buildProject — integration", () => {
   test("builds demo-project and produces expected outputs", async () => {
@@ -22,6 +24,10 @@ describe("buildProject — integration", () => {
       expect(jsFiles.some((f) => /^main[.\-]/.test(f))).toBe(true);
       expect(jsFiles.some((f) => /^test[.\-]/.test(f))).toBe(true);
       expect(jsFiles.some((f) => /^demo[.\-]/.test(f))).toBe(true);
+      const mapFiles = await Array.fromAsync(
+        new Bun.Glob("**/*.js.map").scan(tmpOut),
+      );
+      expect(mapFiles).toHaveLength(0);
 
       // CSS outputs
       const cssFiles = await Array.fromAsync(
@@ -134,6 +140,100 @@ describe("buildProject — integration", () => {
       expect(worldHtml).toMatch(/demo[.\-][0-9a-z]+\.js/);
     } finally {
       await rm(tmpOut, { recursive: true, force: true });
+    }
+  });
+
+  test("emits accurate external source maps when enabled", async () => {
+    try {
+      await rm(tmpSourceMapSrc, { recursive: true, force: true });
+      await rm(tmpSourceMapOut, { recursive: true, force: true });
+      await mkdir(tmpSourceMapSrc, { recursive: true });
+      await Bun.write(
+        join(tmpSourceMapSrc, "index.html"),
+        `<script type="module" src="./main.ts"></script>`,
+      );
+      await Bun.write(
+        join(tmpSourceMapSrc, "main.ts"),
+        `const message: string = "source map"; console.log(message);`,
+      );
+
+      await buildProject(
+        tmpSourceMapSrc,
+        tmpSourceMapOut,
+        undefined,
+        false,
+        undefined,
+        undefined,
+        false,
+        false,
+        true,
+      );
+      const jsFiles = await Array.fromAsync(
+        new Bun.Glob("**/*.js").scan(tmpSourceMapOut),
+      );
+      expect(jsFiles).toHaveLength(1);
+      const mainJs = jsFiles[0];
+      const mainMap = `${mainJs}.map`;
+      expect(existsSync(join(tmpSourceMapOut, mainMap))).toBe(true);
+
+      const js = await Bun.file(join(tmpSourceMapOut, mainJs)).text();
+      expect(js).toContain(`sourceMappingURL=${basename(mainMap)}`);
+      const map = await Bun.file(join(tmpSourceMapOut, mainMap)).json() as {
+        sources: string[];
+      };
+      expect(map.sources.some((source) => source.endsWith("main.ts"))).toBe(
+        true,
+      );
+
+      const staleMap = join(tmpSourceMapOut, "orphan.abcdef.js.map");
+      await Bun.write(staleMap, "{}");
+      await rm(join(tmpSourceMapOut, mainMap));
+      await buildProject(
+        tmpSourceMapSrc,
+        tmpSourceMapOut,
+        undefined,
+        true,
+        undefined,
+        undefined,
+        false,
+        false,
+        true,
+      );
+      expect(existsSync(join(tmpSourceMapOut, mainMap))).toBe(true);
+      expect(existsSync(staleMap)).toBe(false);
+
+      await Bun.write(
+        join(tmpSourceMapSrc, "worker.ts"),
+        `postMessage("ready");`,
+      );
+      await Bun.write(
+        join(tmpSourceMapSrc, "main.ts"),
+        `new Worker("./worker.ts", { type: "module" });`,
+      );
+      await buildProject(
+        tmpSourceMapSrc,
+        tmpSourceMapOut,
+        undefined,
+        false,
+        undefined,
+        undefined,
+        false,
+        false,
+        true,
+      );
+      const rewrittenMain = (await Array.fromAsync(
+        new Bun.Glob("main.*.js").scan(tmpSourceMapOut),
+      )).at(-1)!;
+      expect(existsSync(join(tmpSourceMapOut, `${rewrittenMain}.map`))).toBe(
+        false,
+      );
+      const rewrittenCode = await Bun.file(
+        join(tmpSourceMapOut, rewrittenMain),
+      ).text();
+      expect(rewrittenCode).not.toContain("sourceMappingURL=");
+    } finally {
+      await rm(tmpSourceMapSrc, { recursive: true, force: true });
+      await rm(tmpSourceMapOut, { recursive: true, force: true });
     }
   });
 });

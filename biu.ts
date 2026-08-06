@@ -34,6 +34,7 @@ async function run() {
     cdnCacheDir,
     offline,
     rebiuing,
+    sourceMap,
   } = parseArgs();
 
   if (version) {
@@ -97,6 +98,7 @@ async function run() {
       !!offline,
       // proxy fallback only when dev server is running
       !!servePort,
+      sourceMap,
     );
     await postBuild(outDir, postBuildScript);
   }
