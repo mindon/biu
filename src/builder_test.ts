@@ -1,5 +1,5 @@
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
-import { basename, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { existsSync } from "node:fs";
 import { mkdir, rm } from "node:fs/promises";
 import { buildProject } from "./builder.ts";
@@ -200,7 +200,8 @@ describe("buildProject — integration", () => {
         true,
       );
       expect(existsSync(join(tmpSourceMapOut, mainMap))).toBe(true);
-      expect(existsSync(staleMap)).toBe(false);
+      // 非 biu 清单记录的文件必须保留，避免误删外部或 post-build 产物。
+      expect(existsSync(staleMap)).toBe(true);
 
       await Bun.write(
         join(tmpSourceMapSrc, "worker.ts"),
@@ -1063,5 +1064,66 @@ describe("buildProject — import maps", () => {
     const code = await Bun.file(join(tmpInlineOut, app)).text();
     expect(code).toContain("dyn-pkg/sub");
     expect(code).toMatch(/from\s*["']dyn-pkg\/sub["']/);
+  });
+});
+
+describe("buildProject — output ownership cleanup", () => {
+  const ownershipSrc = join(import.meta.dir, "__test_ownership_src__");
+  const ownershipOut = join(import.meta.dir, "__test_ownership_out__");
+
+  test("preserves external outputs and HTML-referenced downstream JS", async () => {
+    try {
+      await Promise.all([
+        rm(ownershipSrc, { recursive: true, force: true }),
+        rm(ownershipOut, { recursive: true, force: true }),
+      ]);
+      await mkdir(ownershipSrc, { recursive: true });
+      await Bun.write(
+        join(ownershipSrc, "index.html"),
+        `<script type="module" src="./app.ts"></script>`,
+      );
+      await Bun.write(join(ownershipSrc, "app.ts"), `console.log("v1");`);
+      await buildProject(ownershipSrc, ownershipOut);
+
+      const app = (await Array.fromAsync(
+        new Bun.Glob("app.*.js").scan(ownershipOut),
+      )).at(0)!;
+      const cdnOutput = join(
+        ownershipOut,
+        "cdn",
+        "cdn.example.com",
+        "vendor.abcdef12.js",
+      );
+      const postBuildOutput = join(
+        ownershipOut,
+        "vendor",
+        "runtime-abcdef12.js",
+      );
+      await Promise.all([
+        mkdir(dirname(cdnOutput), { recursive: true }),
+        mkdir(dirname(postBuildOutput), { recursive: true }),
+      ]);
+      await Promise.all([
+        Bun.write(cdnOutput, "console.log('cdn')"),
+        Bun.write(postBuildOutput, "console.log('post-build')"),
+      ]);
+
+      // 模拟上游 HTML 继续直接引用上一轮的下游产物，但 app.ts 已不再参与本轮构建。
+      await Bun.write(
+        join(ownershipSrc, "index.html"),
+        `<script type="module" src="./${app}"></script>`,
+      );
+      await rm(join(ownershipSrc, "app.ts"));
+      await buildProject(ownershipSrc, ownershipOut);
+
+      expect(existsSync(join(ownershipOut, app))).toBe(true);
+      expect(existsSync(cdnOutput)).toBe(true);
+      expect(existsSync(postBuildOutput)).toBe(true);
+    } finally {
+      await Promise.all([
+        rm(ownershipSrc, { recursive: true, force: true }),
+        rm(ownershipOut, { recursive: true, force: true }),
+      ]);
+    }
   });
 });

@@ -3,7 +3,15 @@
 import { build } from "bun";
 import { existsSync } from "node:fs";
 import { mkdir, unlink } from "node:fs/promises";
-import { basename, dirname, extname, join, relative, resolve } from "node:path";
+import {
+  basename,
+  dirname,
+  extname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+} from "node:path";
 
 import { ASSET_EXTS, MANAGED_EXTS, VERSION } from "./constants.ts";
 import {
@@ -1323,7 +1331,10 @@ export async function buildProject(
       }
     }
 
-    if (warnings.length > 0) {
+    if (
+      warnings.length > 0 &&
+      /^(?:true|1|yes)$/i.test(process.env.BIU_WARNING?.trim() ?? "")
+    ) {
       console.warn(
         `\n⚠️  Warning: ${warnings.length} asset reference(s) in src/ not found in src/ or static/:`,
       );
@@ -1331,27 +1342,89 @@ export async function buildProject(
     }
   }
 
-  // ── 清理 dist/ 中的孤儿 hash 产物 ──
-  // 当上游文件改变后，下游产物的 content hash 也会改变 → 旧 hash 文件成为孤儿。
-  // 这里识别并删除：文件名带 hash 但不在本次构建的输出集合中的产物。
-  // 安全保护：跳过 static/ 中存在的同路径文件、HTML 文件、未带 hash 模式的文件。
+  // ── 清理上一轮 biu 自己生成的孤儿产物 ──
+  // 不再根据 hash 样式猜测文件归属：CDN 镜像、post-build 及外部工具产物也常
+  // 使用带 hash 的命名。清单只记录 biu 本轮实际写入的文件，下一轮仅删除清单
+  // 中已不再生成的路径；首次启用时没有历史清单，保守地不删除既有文件。
   let cleaned = 0;
   try {
     if (existsSync(outDir)) {
-      // 收集本次构建所有合法输出（绝对路径）
-      const validOutputs = new Set<string>();
-      for (const p of sourceToOutput.values()) validOutputs.add(p);
-      for (const p of sourceToOutputCss.values()) validOutputs.add(p);
-      for (const p of sourceToOutputAsset.values()) validOutputs.add(p);
-      for (const o of allOutputs) {
-        if (o?.path) validOutputs.add(o.path);
-      }
-      // HTML 输出位置也需要保护（HTML 不带 hash，但显式列出更稳妥）
-      for (const f of htmlFiles) {
-        validOutputs.add(f.replace(srcDir, outDir));
+      const outputRoot = resolve(outDir);
+      const manifestPath = join(outputRoot, ".biu", "outputs.json");
+      const toOutputRelative = (path: string): string | null => {
+        const absolute = resolve(path);
+        const rel = relative(outputRoot, absolute);
+        return !rel || isAbsolute(rel) || /^\.\.(?:[\\/]|$)/.test(rel)
+          ? null
+          : rel;
+      };
+      const fromOutputRelative = (rel: string): string | null => {
+        const absolute = resolve(outputRoot, rel);
+        return toOutputRelative(absolute) === rel ? absolute : null;
+      };
+
+      const previousOwned = new Set<string>();
+      if (existsSync(manifestPath)) {
+        try {
+          const manifest = await Bun.file(manifestPath).json() as {
+            outputs?: unknown;
+          };
+          if (Array.isArray(manifest.outputs)) {
+            for (const output of manifest.outputs) {
+              if (
+                typeof output === "string" &&
+                fromOutputRelative(output)
+              ) {
+                previousOwned.add(output);
+              }
+            }
+          }
+        } catch {
+          // 清单损坏时不做猜测性删除；本轮会在构建结束后安全重建它。
+        }
       }
 
-      // 收集 staticDir 下所有相对路径，用于保护被 copyStaticDir 复制过来的文件
+      const currentOwned = new Set<string>();
+      const recordCurrentOutput = (path: string) => {
+        const rel = toOutputRelative(path);
+        if (rel && existsSync(resolve(path))) currentOwned.add(rel);
+      };
+      for (const p of sourceToOutput.values()) recordCurrentOutput(p);
+      for (const p of sourceToOutputCss.values()) recordCurrentOutput(p);
+      for (const p of sourceToOutputAsset.values()) recordCurrentOutput(p);
+      for (const o of allOutputs) if (o?.path) recordCurrentOutput(o.path);
+      for (const f of htmlFiles) recordCurrentOutput(f.replace(srcDir, outDir));
+
+      // 上游 HTML 仍直接引用的下游 CSS / JS 不清理。仅延续清单中已知的
+      // biu 产物所有权，避免将用户或外部工具的文件纳入未来删除范围。
+      const htmlReferenced = new Set<string>();
+      await Promise.all(htmlFiles.map(async (file) => {
+        const outputHtml = file.replace(srcDir, outDir);
+        if (!existsSync(outputHtml)) return;
+        const content = await Bun.file(outputHtml).text();
+        for (
+          const match of content.matchAll(
+            /\b(?:src|href)\s*=\s*["']([^"']+)["']/gi,
+          )
+        ) {
+          const ref = match[1];
+          if (!ref || /^(?:data:|https?:|\/\/|#)/i.test(ref)) continue;
+          const clean = ref.replace(/[?#].*$/, "");
+          if (!/^\.(?:css|[cm]?js)$/i.test(extname(clean))) continue;
+          const output = clean.startsWith("/")
+            ? resolve(outputRoot, `.${clean}`)
+            : resolve(dirname(outputHtml), clean);
+          const rel = toOutputRelative(output);
+          if (rel && existsSync(output)) htmlReferenced.add(rel);
+        }
+      }));
+
+      const nextOwned = new Set(currentOwned);
+      for (const rel of previousOwned) {
+        if (htmlReferenced.has(rel)) nextOwned.add(rel);
+      }
+
+      // 当前 static/ 路径始终由静态目录负责，不能作为旧 biu 产物删除。
       const staticRelPaths = new Set<string>();
       if (staticDir && existsSync(staticDir)) {
         for (const sf of await scan(staticDir)) {
@@ -1359,29 +1432,28 @@ export async function buildProject(
         }
       }
 
-      // hash 模式：
-      //   JS:        name.HASH.js     (e.g. main.s5aj6zwp.js)
-      //   CSS/Asset: name-HASH.ext    (e.g. styles-d4496399.css, mindon-3dadbdab.png)
-      //   hash 长度 6-32，字母数字
-      const HASH_DOT_RE = /\.[a-z0-9]{6,32}\.(?:js|mjs|css)(?:\.map)?$/i;
-      const HASH_DASH_RE = /-[a-z0-9]{6,32}\.[a-z0-9]+$/i;
-
-      const distFiles = await scan(outDir);
-      // 先筛出待删除候选，再 Promise.all 并发 unlink（IO 并发收益）
       const toDelete: string[] = [];
-      for (const f of distFiles) {
-        if (validOutputs.has(f)) continue;
-        const rel = relative(outDir, f);
-        if (staticRelPaths.has(rel)) continue;
-        const base = basename(f);
-        const isHashed = HASH_DOT_RE.test(base) || HASH_DASH_RE.test(base);
-        if (!isHashed) continue;
-        toDelete.push(f);
+      for (const rel of previousOwned) {
+        if (nextOwned.has(rel) || staticRelPaths.has(rel)) continue;
+        const output = fromOutputRelative(rel);
+        if (output && existsSync(output)) toDelete.push(output);
       }
       const results = await Promise.all(
-        toDelete.map((f) => unlink(f).then(() => true, () => false)),
+        toDelete.map((file) => unlink(file).then(() => true, () => false)),
       );
       cleaned = results.reduce((n, ok) => n + (ok ? 1 : 0), 0);
+
+      await mkdir(dirname(manifestPath), { recursive: true });
+      await Bun.write(
+        manifestPath,
+        `${
+          JSON.stringify(
+            { version: 1, outputs: [...nextOwned].sort() },
+            null,
+            2,
+          )
+        }\n`,
+      );
     }
   } catch (err) {
     console.warn(`⚠️  Cleanup warning: ${(err as Error).message}`);

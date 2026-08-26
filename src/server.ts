@@ -17,6 +17,71 @@ function ignored(filename?: string): boolean {
   return false;
 }
 
+export interface RebuildScheduler {
+  enqueue(filename?: string, staticMode?: string): void;
+  whenIdle(): Promise<void>;
+}
+
+/**
+ * 将高频文件事件合并为串行构建。构建过程中出现的新事件会在当前构建结束后补跑，
+ * 不会因防抖计时器恰好命中 building 状态而丢失。
+ */
+export function createRebuildScheduler(
+  rebuild: (filename?: string, staticMode?: string) => Promise<void>,
+  delay = 200,
+): RebuildScheduler {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let building = false;
+  let pending = false;
+  let pendingFilename: string | undefined;
+  let pendingStaticMode: string | undefined;
+  const idleResolvers = new Set<() => void>();
+
+  const resolveIdle = () => {
+    if (building || pending || timer) return;
+    for (const resolve of idleResolvers) resolve();
+    idleResolvers.clear();
+  };
+
+  const schedule = () => {
+    if (building || timer || !pending) return;
+    timer = setTimeout(async () => {
+      timer = null;
+      if (building || !pending) return;
+      const filename = pendingFilename;
+      const staticMode = pendingStaticMode;
+      pending = false;
+      pendingFilename = undefined;
+      pendingStaticMode = undefined;
+      building = true;
+      try {
+        await rebuild(filename, staticMode);
+      } finally {
+        building = false;
+        schedule();
+        resolveIdle();
+      }
+    }, delay);
+  };
+
+  return {
+    enqueue(filename?: string, staticMode?: string) {
+      pending = true;
+      pendingFilename = filename ?? pendingFilename;
+      pendingStaticMode = staticMode ?? pendingStaticMode;
+      if (timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
+      schedule();
+    },
+    whenIdle() {
+      if (!building && !pending && !timer) return Promise.resolve();
+      return new Promise((resolve) => idleResolvers.add(resolve));
+    },
+  };
+}
+
 /**
  * 启动 Watch 模式，监听 srcDir 和 staticDir 的变更并触发重建
  */
@@ -28,42 +93,24 @@ export function startWatcher(
 ) {
   console.log("🚀 Watch mode enabled...");
 
-  // 防抖：避免短时间内多次触发重建
-  let debounceTimer: ReturnType<typeof setTimeout> | null = null;
-  let building = false;
-  let pendingFilename: string | undefined;
-  let pendingStaticMode: string | undefined;
-  const rebuild = (filename?: string, staticMode?: string) => {
-    pendingFilename = filename ?? pendingFilename;
-    pendingStaticMode = staticMode ?? pendingStaticMode;
-    if (debounceTimer) clearTimeout(debounceTimer);
-    debounceTimer = setTimeout(async () => {
-      if (building) return;
-      building = true;
-      const fname = pendingFilename;
-      const mode = pendingStaticMode;
-      pendingFilename = undefined;
-      pendingStaticMode = undefined;
-      const now = new Date().toLocaleTimeString();
-      try {
-        console.log(
-          fname
-            ? `\n✨ Detected change in ${fname}, rebuilding...`
-            : "\n✨ Rebuilding...",
-        );
-        await fullBuild(mode);
-        console.log(
-          fname
-            ? `\n✨ ${fname} changed at ${now}`
-            : `\n✨ rebuilded at ${now}`,
-        );
-      } catch (err) {
-        console.error("❌ Build error:", err, now);
-      } finally {
-        building = false;
-      }
-    }, 200);
-  };
+  const rebuild = createRebuildScheduler(async (filename, staticMode) => {
+    const now = new Date().toLocaleTimeString();
+    try {
+      console.log(
+        filename
+          ? `\n✨ Detected change in ${filename}, rebuilding...`
+          : "\n✨ Rebuilding...",
+      );
+      await fullBuild(staticMode);
+      console.log(
+        filename
+          ? `\n✨ ${filename} changed at ${now}`
+          : `\n✨ rebuilded at ${now}`,
+      );
+    } catch (err) {
+      console.error("❌ Build error:", err, now);
+    }
+  });
 
   // 监听源目录
   watch(srcDir, { recursive: true }, (_event, filename) => {
@@ -71,7 +118,7 @@ export function startWatcher(
     const rel = filename.toString();
     if (ignored(rel)) return;
     if (!isRealChange(join(srcDir, rel))) return;
-    rebuild(rel);
+    rebuild.enqueue(rel);
   });
 
   // 同时监听 static 目录
@@ -81,7 +128,7 @@ export function startWatcher(
       const rel = filename.toString();
       if (ignored(rel)) return;
       if (!isRealChange(join(staticDir, rel))) return;
-      rebuild(rel, "static");
+      rebuild.enqueue(rel, "static");
     });
     console.log(`👀 Watching static dir: ${relative(cwd, staticDir)}`);
   }
