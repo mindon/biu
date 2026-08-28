@@ -26,6 +26,24 @@ describe("compileStyle", () => {
     }
   });
 
+  test("preserves SVG data URI filters without scanning their payload", async () => {
+    await mkdir(tmpDir, { recursive: true });
+    const cssFile = join(tmpDir, "svg-data-uri.css");
+    await Bun.write(
+      cssFile,
+      `h3 { background-image: url("data:image/svg+xml,%3Csvg%3E%3Cfilter id='n'/%3E%3Crect filter='url(%23n)'/%3E%3C/svg%3E"); }`,
+    );
+
+    try {
+      const result = await compileStyle(cssFile);
+      expect(result).toContain("data:image/svg+xml");
+      expect(result).toContain("url(%23n)");
+      expect(result).not.toContain("https://biu.invalid/url/");
+    } finally {
+      await rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
   test("compiles and minifies SCSS file", async () => {
     await mkdir(tmpDir, { recursive: true });
     const scssFile = join(tmpDir, "test.scss");

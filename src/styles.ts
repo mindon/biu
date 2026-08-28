@@ -8,6 +8,7 @@ import { mkdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, extname, join, relative } from "node:path";
 import { contentHash, hashAssetCached } from "./utils.ts";
+import { isDataUrl, isHttpUrl, scanCssUrls } from "./css-urls.ts";
 
 /**
  * CleanCSS 单例，仍然用于 **字符串级别** 的 CSS 压缩场景
@@ -31,15 +32,22 @@ const URL_PLACEHOLDER_PREFIX = "https://biu.invalid/url/";
 
 function maskUrls(css: string): { masked: string; originals: string[] } {
   const originals: string[] = [];
-  const masked = css.replace(
-    /url\(\s*(?!["']?data\s*:)([^)]+?)\s*\)/gi,
-    (_match, inner) => {
-      const idx = originals.length;
-      originals.push(inner.trim());
-      return `url("${URL_PLACEHOLDER_PREFIX}${idx}")`;
-    },
-  );
-  return { masked, originals };
+  let cursor = 0;
+  let masked = "";
+
+  for (const token of scanCssUrls(css)) {
+    if (isDataUrl(token.value)) continue;
+    const idx = originals.length;
+    originals.push(token.raw);
+    masked += `${
+      css.slice(cursor, token.start)
+    }url("${URL_PLACEHOLDER_PREFIX}${idx}")`;
+    cursor = token.end;
+  }
+  return {
+    masked: originals.length ? masked + css.slice(cursor) : css,
+    originals,
+  };
 }
 
 function restoreUrls(css: string, originals: string[]): string {
@@ -174,11 +182,8 @@ export async function compileStyle(filePath: string): Promise<string> {
  */
 function collectCssUrlRefs(css: string, cssDir: string): string[] {
   const refs = new Set<string>();
-  const re =
-    /url\(\s*(?!["']?(?:data\s*:|https?:\/\/))["']?([^"')]+?)["']?\s*\)/gi;
-  for (const m of css.matchAll(re)) {
-    const ref = m[1]?.trim();
-    if (!ref) continue;
+  for (const { value: ref } of scanCssUrls(css)) {
+    if (!ref || isDataUrl(ref) || isHttpUrl(ref)) continue;
     // 去掉 query / hash
     const clean = ref.replace(/[?#].*$/, "");
     if (!clean) continue;

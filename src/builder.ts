@@ -23,6 +23,7 @@ import {
 import { autoInstallDeps } from "./deps.ts";
 import type { DependsMode } from "./cli.ts";
 import { processStyleFiles } from "./styles.ts";
+import { isDataUrl, isHttpUrl, scanCssUrls } from "./css-urls.ts";
 import { processAssetFiles } from "./assets.ts";
 import { createBasePlugin, createMainPlugin } from "./plugins.ts";
 import { processHtml } from "./html.ts";
@@ -1266,11 +1267,10 @@ export async function buildProject(
     for (const file of styleFiles) {
       const cssDir = dirname(file);
       const content = await Bun.file(file).text();
-      const urlRefs = content.matchAll(
-        /url\(\s*(?!["']?(?:data\s*:|https?:\/\/))["']?([^"')]+?)["']?\s*\)/gi,
-      );
-      for (const m of urlRefs) {
-        const ref = m[1].replace(/[?#].*$/, "");
+      const urlRefs = scanCssUrls(content);
+      for (const { value } of urlRefs) {
+        if (isDataUrl(value) || isHttpUrl(value)) continue;
+        const ref = value.replace(/[?#].*$/, "");
         if (!ref) continue;
         const abs = resolve(cssDir, ref);
         if (knownFiles.has(abs) || existsSync(abs)) continue;

@@ -16,6 +16,7 @@ import { dirname, extname, join, posix, relative } from "node:path";
 
 import { CDN_SHIM_SRC } from "./cdn-shim.ts";
 import { scan } from "./utils.ts";
+import { isDataUrl, isHttpUrl, scanCssUrls } from "./css-urls.ts";
 
 // ─── URL-extraction regexes ──────────────────────────────────────────
 
@@ -24,9 +25,7 @@ import { scan } from "./utils.ts";
 const RE_HTML_ATTR =
   /(?:src|href|data-src)\s*=\s*["'](https?:\/\/[^"'\s>]+)["']/gi;
 
-// CSS: url(https://...), url("https://...") — skip data: URIs
-const RE_CSS_URL =
-  /url\(\s*(?!["']?data\s*:)["']?(https?:\/\/[^"')\s]+)["']?\s*\)/gi;
+// Bare `@import "https://..."` values; url(...) values use scanCssUrls().
 const RE_CSS_IMPORT_BARE = /@import\s+["'](https?:\/\/[^"']+)["']/gi;
 
 // JS/TS: import "...", import x from "...", export ... from "...", import("...")
@@ -79,7 +78,9 @@ export function extractHtmlCdnUrls(html: string): Set<string> {
 /** Extract every absolute https:// URL referenced inside a CSS file. */
 export function extractCssCdnUrls(css: string): Set<string> {
   const out = new Set<string>();
-  pushAll(RE_CSS_URL, css, out);
+  for (const { value } of scanCssUrls(css)) {
+    if (isHttpUrl(value)) out.add(value);
+  }
   pushAll(RE_CSS_IMPORT_BARE, css, out);
   return out;
 }
@@ -145,8 +146,6 @@ function isCssLike(ct: string | null, urlPath: string): boolean {
 
 const RE_REL_JS =
   /(?:\b(?:import|export)\b[^"';]*?\bfrom\s*|\bimport\s*\(\s*|\bimport\s*)["'](\.{1,2}\/[^"']+)["']/g;
-const RE_REL_CSS_URL =
-  /url\(\s*(?!["']?(?:data\s*:|https?:\/\/))["']?(\.{0,2}\/?[^"')\s]+)["']?\s*\)/gi;
 const RE_REL_CSS_IMPORT = /@import\s+["'](\.{0,2}\/?[^"']+)["']/gi;
 
 /**
@@ -238,9 +237,13 @@ export async function fetchAndCacheAll(
         }
       }
     } else {
-      for (const m of text.matchAll(RE_REL_CSS_URL)) {
+      for (const { value } of scanCssUrls(text)) {
+        if (
+          isDataUrl(value) || isHttpUrl(value) ||
+          /^(?:\/\/|#|[a-z][a-z0-9+.-]*:)/i.test(value)
+        ) continue;
         try {
-          const abs = new URL(m[1], url).toString();
+          const abs = new URL(value, url).toString();
           if (/^https?:\/\//.test(abs)) inner.add(abs);
         } catch {
           // ignore
